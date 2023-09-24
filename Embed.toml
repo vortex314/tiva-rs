@@ -1,0 +1,8 @@
+[default.general]
+chip = "lm4f120"
+
+[debug.gdb]
+enabled = true
+
+[debug.reset]
+halt_afterwards = true
