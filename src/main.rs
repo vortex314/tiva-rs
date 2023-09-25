@@ -2,7 +2,6 @@
 #![no_main]
 #![allow(deprecated)]
 use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
-
 use core::fmt::Write;
 use cortex_m_rt::entry;
 use tm4c123x_hal::eeprom::{
@@ -38,9 +37,9 @@ fn main() -> ! {
     let mut pin_red = portf.pf1.into_push_pull_output();
     let mut pin_blue = portf.pf2.into_push_pull_output();
     let mut pin_green = portf.pf3.into_push_pull_output();
-    pin_red.set_low();
-    pin_blue.set_low();
-
+    let mut ctrl = portf.control;
+    let switch2 = portf.pf0.unlock(&mut ctrl).into_pull_up_input();
+    let switch1 = portf.pf4.into_pull_up_input();
 
 
     let mut porta = p.GPIO_PORTA.split(&sc.power_control);
@@ -94,17 +93,20 @@ fn main() -> ! {
         if  counter > 100000 {
             SCB::sys_reset();
         }
-        if counter % 100 < 33 {
+        
+        if counter % 100 < 1 {
             pin_red.set_low();
             pin_blue.set_low();
-            pin_green.set_high();
-        } else if counter % 100 < 66 {
-            pin_red.set_low();
             pin_green.set_low();
-            pin_blue.set_high();
-        } else {
+        } ;
+        if switch1.is_low() {
             pin_red.set_high();
             pin_blue.set_low();
+            pin_green.set_low();
+        }
+        if switch2.is_low() {
+            pin_red.set_low();
+            pin_blue.set_high();
             pin_green.set_low();
         }
     }
