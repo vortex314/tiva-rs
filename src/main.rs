@@ -1,26 +1,60 @@
 #![no_std]
 #![no_main]
 #![allow(deprecated)]
-use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
 use core::fmt::Write;
+use core::ops::Deref;
+use cortex_m::peripheral::SCB;
 use cortex_m_rt::entry;
+use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
 use tm4c123x_hal::eeprom::{
     Blocks, Eeprom, EepromAddress, EepromError, Erase, Read, Write as EepromWrite,
 };
 use tm4c123x_hal::{self as hal, prelude::*};
-use cortex_m::peripheral::SCB;
-//use serde_json_core::de::from_slice;
-//use serde_json_core::ser::to_string;
 
-use serde_derive::Serialize;
-#[derive(Serialize,  Debug)]
+use heapless::Vec;
+use postcard::{from_bytes, to_vec};
+use serde::{Deserialize, Serialize};
 
-struct Publish {
-    topic: &'static str,
-    payload: &'static str,
-    qos: i8,
-    retain: bool,
-}   
+
+#[derive(Serialize, Deserialize, Debug)]
+
+enum WireMsg {
+    Publish {
+        topic: &'static str,
+        payload: &'static str,
+        qos: i8,
+        retain: bool,
+    },
+    Subscribe {
+        topic: &'static str,
+        qos: i8,
+    },
+    Unsubscribe {
+        topic: &'static str,
+    },
+    Pingreq,
+    Disconnect,
+    Connect {
+        client_id: &'static str,
+        will_topic: &'static str,
+        will_message: &'static str,
+        username: &'static str,
+        password: &'static str,
+    },
+    Connack {
+        session_present: bool,
+        return_code: u8,
+    },
+    Puback {
+        packet_id: u16,
+    },
+    Pubrec {
+        packet_id: u16,
+    },
+    Pubrel {
+        packet_id: u16,
+    },
+}
 
 #[entry]
 fn main() -> ! {
@@ -33,27 +67,25 @@ fn main() -> ! {
     );
     let clocks = sc.clock_setup.freeze();
 
-    let portf = p.GPIO_PORTF.split(&sc.power_control);
+    let mut portf = p.GPIO_PORTF.split(&sc.power_control);
     let mut pin_red = portf.pf1.into_push_pull_output();
     let mut pin_blue = portf.pf2.into_push_pull_output();
     let mut pin_green = portf.pf3.into_push_pull_output();
-    let mut ctrl = portf.control;
-    let switch2 = portf.pf0.unlock(&mut ctrl).into_pull_up_input();
+    //let mut ctrl = portf.control;
+    let switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
     let switch1 = portf.pf4.into_pull_up_input();
 
-
     let mut porta = p.GPIO_PORTA.split(&sc.power_control);
-    let publish_msg = Publish {
+    let publish_msg = WireMsg::Publish {
         topic: "test",
         payload: "test",
         qos: 0,
         retain: false,
     };
-    let mut buf = [0u8;128];
-    let buf_length = serde_json_core::ser::to_slice(&publish_msg,&mut buf).unwrap();
 
-
-  /*   let mut eeprom = Eeprom::new(p.EEPROM, &sc.power_control);
+    let msg: Vec<u8,128> = to_vec(&publish_msg).unwrap();
+    let wire_msg : WireMsg = from_bytes(msg.deref()).unwrap();
+    /*   let mut eeprom = Eeprom::new(p.EEPROM, &sc.power_control);
 
     match eeprom_test_all(&mut eeprom) {
         Ok(_) => {
@@ -65,7 +97,7 @@ fn main() -> ! {
     }*/
 
     // Activate UART
-    let  uart = hal::serial::Serial::uart0(
+    let uart = hal::serial::Serial::uart0(
         p.UART0,
         porta
             .pa1
@@ -81,24 +113,25 @@ fn main() -> ! {
         &sc.power_control,
     );
 
-    let (mut tx,_rx) = uart.split();
+    let (mut tx, _rx) = uart.split();
 
     let mut counter = 0u32;
     loop {
-        tx.write_fmt(format_args!("Hello, world! {} => {} \r\n", counter,buf_length)).unwrap();
-        tx.write_all(&buf);
+        tx.write_fmt(format_args!("Hello, world! {}  \r\n", counter))
+            .unwrap();
+ //       tx.write_all(&msg);
         tx.write_char('\n' as u8 as char).unwrap();
 
         counter = counter.wrapping_add(1);
-        if  counter > 100000 {
+        if counter > 100000 {
             SCB::sys_reset();
         }
-        
+
         if counter % 100 < 1 {
             pin_red.set_low();
             pin_blue.set_low();
-            pin_green.set_low();
-        } ;
+            pin_green.set_high();
+        };
         if switch1.is_low() {
             pin_red.set_high();
             pin_blue.set_low();
@@ -111,7 +144,7 @@ fn main() -> ! {
         }
     }
 }
-
+/*
 pub fn eeprom_test_write_read(
     eeprom: &mut Eeprom,
     address: &EepromAddress,
@@ -182,3 +215,5 @@ pub fn eeprom_test_all(eeprom: &mut Eeprom) -> Result<(), EepromError> {
 
     Ok(())
 }
+
+*/

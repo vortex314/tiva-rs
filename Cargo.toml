@@ -17,6 +17,7 @@ serde-json-core = { git = "https://github.com/japaric/serde-json-core" }
 heapless = "0.7.16"
 serde_derive = {version="1.0", default_features = false}
 serde = {version="1.0", default_features = false}
+postcard={ version="*" }
 [profile.dev]
 opt-level = 0
 
