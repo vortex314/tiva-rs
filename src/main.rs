@@ -4,6 +4,7 @@
 #![allow(unused_imports)]
 use core::fmt::Write;
 use core::ops::Deref;
+use cortex_m::delay;
 use cortex_m::peripheral::SCB;
 use cortex_m_rt::entry;
 use embedded_alloc::Heap;
@@ -13,6 +14,11 @@ use tm4c123x_hal::eeprom::{
     Blocks, Eeprom, EepromAddress, EepromError, Erase, Read, Write as EepromWrite,
 };
 use tm4c123x_hal::{self as hal, prelude::*};
+use tm4c123x_hal::delay::Delay;
+use tm4c123x_hal::gpio::GpioExt;
+use tm4c123x_hal::sysctl::SysctlExt;
+use tm4c123x_hal::time::{MonoTimer,Instant};
+
 
 // use postcard::{from_bytes, to_vec};
 use core::alloc::GlobalAlloc;
@@ -23,7 +29,6 @@ use heapless::String;
 use heapless::Vec;
 use core::panic::PanicInfo;
 
-use serde::{Deserialize, Serialize};
 use serde_json_core::{from_slice, to_vec};
 #[macro_use]
 extern crate alloc;
@@ -35,19 +40,25 @@ fn panic(_x: &PanicInfo) -> ! {
     loop {}
 }*/
 
-#[derive(Serialize, Deserialize, Debug)]
-enum WireMsg {
-    Publish {
+fn crc_calc(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF   ;
+    for i in 0..data.len() {
+        crc ^= data[i] as u16;
+        for j in 0..8 {
+            if crc & 1 == 1 {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc = crc >> 1;
+            }
+        }
+    }
+    crc
+}
+
+struct PublishMsg {
         topic: &'static str,
         payload: &'static str,
-    },
-    Subscribe {
-        topic: &'static str,
-    },
-    Unsubscribe {
-        topic: &'static str,
-    },
-}
+    }
 
 #[entry]
 fn main() -> ! {
@@ -58,15 +69,17 @@ fn main() -> ! {
         unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
     }
     let p = hal::Peripherals::take().unwrap();
+    let cp = cortex_m::Peripherals::take().unwrap();
 
-    let mut sc = p.SYSCTL.constrain();
-    sc.clock_setup.oscillator = hal::sysctl::Oscillator::Main(
+
+    let mut sysctl = p.SYSCTL.constrain();
+    sysctl.clock_setup.oscillator = hal::sysctl::Oscillator::Main(
         hal::sysctl::CrystalFrequency::_16mhz,
         hal::sysctl::SystemClock::UsePll(hal::sysctl::PllOutputFrequency::_80_00mhz),
     );
-    let clocks = sc.clock_setup.freeze();
+    let clocks = sysctl.clock_setup.freeze();
 
-    let mut portf = p.GPIO_PORTF.split(&sc.power_control);
+    let mut portf = p.GPIO_PORTF.split(&sysctl.power_control);
     let mut pin_red = portf.pf1.into_push_pull_output();
     let mut pin_blue = portf.pf2.into_push_pull_output();
     let mut pin_green = portf.pf3.into_push_pull_output();
@@ -74,15 +87,17 @@ fn main() -> ! {
     let switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
     let switch1 = portf.pf4.into_pull_up_input();
 
-    let mut porta = p.GPIO_PORTA.split(&sc.power_control);
-    let publish_msg = WireMsg::Publish {
-        topic: "test",
-        payload: "test",
-    };
+    let mut porta = p.GPIO_PORTA.split(&sysctl.power_control);
+    let mut timer = Delay::new(cp.SYST, &clocks);
+    let mut mono_timer  = tm4c123x_hal::time::MonoTimer::new(cp.DWT, clocks);
+    let mut instant = mono_timer.now();
 
-    let mut array = Vec::<&str,3>::new();
 
-    let buffer:Vec<u8,100> = to_vec(&["pub","topic","value"]).unwrap();
+    let publish_msg = PublishMsg { topic:"src/tiva/sys/loopback",payload:"true"};
+
+   // let mut buffer:Vec<u8,100> = to_vec(&["pub","topic","value"]).unwrap();
+    let mut buffer:Vec<u8,100> = to_vec(&["pub",publish_msg.topic,publish_msg.payload]).unwrap();
+
 
     // Activate UART
     let uart = hal::serial::Serial::uart0(
@@ -98,18 +113,20 @@ fn main() -> ! {
         115200_u32.bps(),
         hal::serial::NewlineMode::SwapLFtoCRLF,
         &clocks,
-        &sc.power_control,
+        &sysctl.power_control,
     );
 
     let (mut tx, _rx) = uart.split();
 
     let mut counter = 0u32;
     loop {
-        tx.write_fmt(format_args!("Hello, world! {}  \r\n", counter))
-            .unwrap();
         //       tx.write_all(&msg);
-        tx.write_char('\n' as u8 as char).unwrap();
         tx.write_all(&buffer);
+        let crc = crc_calc(&buffer);
+        tx.write_fmt(format_args!("{:X}\r\n", crc))
+            .unwrap();
+ //       tx.write_char('\n' as u8 as char).unwrap();
+        timer.delay_ms(1000u32);
 
         counter = counter.wrapping_add(1);
         if counter > 100000 {
