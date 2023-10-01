@@ -1,63 +1,62 @@
 #![no_std]
 #![no_main]
 #![allow(deprecated)]
+#![allow(unused_imports)]
 use core::fmt::Write;
 use core::ops::Deref;
 use cortex_m::peripheral::SCB;
 use cortex_m_rt::entry;
+use embedded_alloc::Heap;
+
 use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
 use tm4c123x_hal::eeprom::{
     Blocks, Eeprom, EepromAddress, EepromError, Erase, Read, Write as EepromWrite,
 };
 use tm4c123x_hal::{self as hal, prelude::*};
 
+// use postcard::{from_bytes, to_vec};
+use core::alloc::GlobalAlloc;
+use core::alloc::Layout;
+use core::ffi::c_void;
+use heapless::LinearMap;
+use heapless::String;
 use heapless::Vec;
-use postcard::{from_bytes, to_vec};
-use serde::{Deserialize, Serialize};
+use core::panic::PanicInfo;
 
+use serde::{Deserialize, Serialize};
+use serde_json_core::{from_slice, to_vec};
+#[macro_use]
+extern crate alloc;
+
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
+/*#[panic_handler]
+fn panic(_x: &PanicInfo) -> ! {
+    loop {}
+}*/
 
 #[derive(Serialize, Deserialize, Debug)]
-
 enum WireMsg {
     Publish {
         topic: &'static str,
         payload: &'static str,
-        qos: i8,
-        retain: bool,
     },
     Subscribe {
         topic: &'static str,
-        qos: i8,
     },
     Unsubscribe {
         topic: &'static str,
-    },
-    Pingreq,
-    Disconnect,
-    Connect {
-        client_id: &'static str,
-        will_topic: &'static str,
-        will_message: &'static str,
-        username: &'static str,
-        password: &'static str,
-    },
-    Connack {
-        session_present: bool,
-        return_code: u8,
-    },
-    Puback {
-        packet_id: u16,
-    },
-    Pubrec {
-        packet_id: u16,
-    },
-    Pubrel {
-        packet_id: u16,
     },
 }
 
 #[entry]
 fn main() -> ! {
+    {
+        use core::mem::MaybeUninit;
+        const HEAP_SIZE: usize = 10240;
+        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
+    }
     let p = hal::Peripherals::take().unwrap();
 
     let mut sc = p.SYSCTL.constrain();
@@ -79,22 +78,11 @@ fn main() -> ! {
     let publish_msg = WireMsg::Publish {
         topic: "test",
         payload: "test",
-        qos: 0,
-        retain: false,
     };
 
-    let msg: Vec<u8,128> = to_vec(&publish_msg).unwrap();
-    let wire_msg : WireMsg = from_bytes(msg.deref()).unwrap();
-    /*   let mut eeprom = Eeprom::new(p.EEPROM, &sc.power_control);
+    let mut array = Vec::<&str,3>::new();
 
-    match eeprom_test_all(&mut eeprom) {
-        Ok(_) => {
-            // Huzzah!
-        }
-        Err(code) => {
-            panic!("Error detected while testing EEPROM: {}", code);
-        }
-    }*/
+    let buffer:Vec<u8,100> = to_vec(&["pub","topic","value"]).unwrap();
 
     // Activate UART
     let uart = hal::serial::Serial::uart0(
@@ -119,8 +107,9 @@ fn main() -> ! {
     loop {
         tx.write_fmt(format_args!("Hello, world! {}  \r\n", counter))
             .unwrap();
- //       tx.write_all(&msg);
+        //       tx.write_all(&msg);
         tx.write_char('\n' as u8 as char).unwrap();
+        tx.write_all(&buffer);
 
         counter = counter.wrapping_add(1);
         if counter > 100000 {
@@ -144,6 +133,17 @@ fn main() -> ! {
         }
     }
 }
+
+/*   let mut eeprom = Eeprom::new(p.EEPROM, &sc.power_control);
+
+match eeprom_test_all(&mut eeprom) {
+    Ok(_) => {
+        // Huzzah!
+    }
+    Err(code) => {
+        panic!("Error detected while testing EEPROM: {}", code);
+    }
+}*/
 /*
 pub fn eeprom_test_write_read(
     eeprom: &mut Eeprom,
