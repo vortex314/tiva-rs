@@ -5,31 +5,36 @@
 use core::fmt::Write;
 use core::ops::Deref;
 use cortex_m::delay;
-use cortex_m::peripheral::SCB;
+use cortex_m::peripheral::{DWT, SCB};
 use cortex_m_rt::entry;
 use embedded_alloc::Heap;
 
-use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
+use heapless::pool::Box;
+use panic_halt as _;
+use serde::ser::SerializeSeq;
+// you can put a breakpoint on `rust_begin_unwind` to catch panics
+use tm4c123x_hal::delay::Delay;
 use tm4c123x_hal::eeprom::{
     Blocks, Eeprom, EepromAddress, EepromError, Erase, Read, Write as EepromWrite,
 };
-use tm4c123x_hal::{self as hal, prelude::*};
-use tm4c123x_hal::delay::Delay;
 use tm4c123x_hal::gpio::GpioExt;
 use tm4c123x_hal::sysctl::SysctlExt;
-use tm4c123x_hal::time::{MonoTimer,Instant};
-
+use tm4c123x_hal::time::{Instant, MonoTimer};
+use tm4c123x_hal::{self as hal, prelude::*};
 
 // use postcard::{from_bytes, to_vec};
 use core::alloc::GlobalAlloc;
 use core::alloc::Layout;
 use core::ffi::c_void;
+use core::panic::PanicInfo;
 use heapless::LinearMap;
 use heapless::String;
 use heapless::Vec;
-use core::panic::PanicInfo;
 
-use serde_json_core::{from_slice, to_vec};
+use serde::Serializer;
+
+use serde_json_core::ser::Serializer as Ser;
+
 #[macro_use]
 extern crate alloc;
 
@@ -41,10 +46,10 @@ fn panic(_x: &PanicInfo) -> ! {
 }*/
 
 fn crc_calc(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0xFFFF   ;
+    let mut crc: u16 = 0xFFFF;
     for i in 0..data.len() {
         crc ^= data[i] as u16;
-        for j in 0..8 {
+        for _j in 0..8 {
             if crc & 1 == 1 {
                 crc = (crc >> 1) ^ 0xA001;
             } else {
@@ -54,11 +59,6 @@ fn crc_calc(data: &[u8]) -> u16 {
     }
     crc
 }
-
-struct PublishMsg {
-        topic: &'static str,
-        payload: &'static str,
-    }
 
 #[entry]
 fn main() -> ! {
@@ -70,7 +70,6 @@ fn main() -> ! {
     }
     let p = hal::Peripherals::take().unwrap();
     let cp = cortex_m::Peripherals::take().unwrap();
-
 
     let mut sysctl = p.SYSCTL.constrain();
     sysctl.clock_setup.oscillator = hal::sysctl::Oscillator::Main(
@@ -89,15 +88,7 @@ fn main() -> ! {
 
     let mut porta = p.GPIO_PORTA.split(&sysctl.power_control);
     let mut timer = Delay::new(cp.SYST, &clocks);
-    let mut mono_timer  = tm4c123x_hal::time::MonoTimer::new(cp.DWT, clocks);
-    let mut instant = mono_timer.now();
-
-
-    let publish_msg = PublishMsg { topic:"src/tiva/sys/loopback",payload:"true"};
-
-   // let mut buffer:Vec<u8,100> = to_vec(&["pub","topic","value"]).unwrap();
-    let mut buffer:Vec<u8,100> = to_vec(&["pub",publish_msg.topic,publish_msg.payload]).unwrap();
-
+    let buffer = &mut [0u8; 100];
 
     // Activate UART
     let uart = hal::serial::Serial::uart0(
@@ -120,12 +111,18 @@ fn main() -> ! {
 
     let mut counter = 0u32;
     loop {
-        //       tx.write_all(&msg);
+        let mut serializer = Ser::new(buffer);
+        let mut seq = serializer.serialize_seq(Some(3)).unwrap();
+        seq.serialize_element("pub").unwrap();
+        seq.serialize_element("src/tiva/sys/loopback").unwrap();
+        let u = counter;
+        seq.serialize_element(&u).unwrap();
+        let _ = seq.end();
+        serializer.end();
+        let crc = crc_calc(buffer);
         tx.write_all(&buffer);
-        let crc = crc_calc(&buffer);
-        tx.write_fmt(format_args!("{:X}\r\n", crc))
-            .unwrap();
- //       tx.write_char('\n' as u8 as char).unwrap();
+        tx.write_fmt(format_args!("{:X}\r\n", crc)).unwrap();
+
         timer.delay_ms(1000u32);
 
         counter = counter.wrapping_add(1);
