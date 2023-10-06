@@ -1,10 +1,9 @@
-#![no_std]
+//#![no_std]
 #![no_main]
 #![allow(deprecated)]
 #![allow(unused_imports)]
-#![feature(type_alias_impl_trait)]
 
-mod limero;
+// mod limero;
 
 use core::fmt::Write;
 use core::ops::Deref;
@@ -32,78 +31,39 @@ use core::alloc::Layout;
 use core::ffi::c_void;
 use core::panic::PanicInfo;
 
-
 use serde::Serializer;
 use serde_json_core::ser::Serializer as Ser;
 
-use tm4c123x_hal::prelude::*;
-mod tm4c123x;
-
-use nb_executor::{Executor,Signals,Events,EventMask,Mpmc,Park,Parked};
-use futures::{FutureExt,Future,};
-use futures::task::{Context, Poll,ArcWake};
-use futures::join;
-use bitflags::bitflags;
-// use futures::select;
-//use core::future::join;
+use heapless::{Arc, Vec};
 use tm4c123x::*;
-use heapless::{Arc,Vec};
+use tm4c123x_hal::prelude::*;
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }
 
-fn park_test(park: Park<'_>) -> Parked {
-    let parked = park.race_free();
-    assert!(!parked.is_idle());
-    parked
+async fn do_something() -> u32 {
+    42
 }
+use spin_on::spin_on;
+use futures::select;
+use futures::prelude::*;
+//use pasts::prelude::*;
 
-bitflags! {
-    struct Ev: u32 {
-        const A = 1 << 3;
-        const B = 1 << 11;
-        const C = 1 << 17;
-        const ALL = Self::A.bits | Self::B.bits | Self::C.bits;
-    }
-}
+#[global_allocator]
+static ALLOCATOR: Heap = Heap::empty();
+const HEAP_SIZE: usize = 1024; // in bytes              // 👈
 
-impl EventMask for Ev {
-    fn as_bits(self) -> u32 {
-        self.bits()
-    }
-}
 
-impl ArcWake for Events<Ev> {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.raise(Ev::ALL)
-    }
-}
 
 #[entry]
 fn main() -> ! {
-    let events = Events::default();
-    let signals = events.watch();
+    unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) }  // 👈
 
-    let queue = Mpmc::<_, 4>::new();
-
-    let producer = async {
-        for n in 0..32 {
-            queue.enqueue(n, &signals, Ev::A).await;
-        }
-    };
-
-    let consumer = async {
-        for n in 0..32 {
-            assert_eq!(queue.dequeue(&signals, Ev::A).await, n);
-        }
-
-        assert_eq!(queue.inner().dequeue(), None);
-    };
-
-    let future = async { join!(producer, consumer) };
-    signals.bind().block_on(future, park_test);
+    spin_on(select! {
+            do_something();
+    });
 
     let p = hal::Peripherals::take().unwrap();
     let cp = cortex_m::Peripherals::take().unwrap();

@@ -33,6 +33,10 @@ rustup default nightly
 - embassy timers drags in a lot of dependencies , if you don't have a stm32 or nrf52 board you are basically out of luck
 
 # RTIC
+- stopped this one,as the programming model just deviates too much from the normal rust async model
+
+# spin_on
+- very simple, but also very limited
 
 
 
