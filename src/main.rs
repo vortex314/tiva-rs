@@ -2,6 +2,10 @@
 #![no_main]
 #![allow(deprecated)]
 #![allow(unused_imports)]
+#![feature(type_alias_impl_trait)]
+
+mod limero;
+
 use core::fmt::Write;
 use core::ops::Deref;
 use cortex_m::delay;
@@ -10,64 +14,97 @@ use cortex_m_rt::entry;
 use embedded_alloc::Heap;
 
 use heapless::pool::Box;
-use panic_halt as _;
 use serde::ser::SerializeSeq;
-// you can put a breakpoint on `rust_begin_unwind` to catch panics
+
 use tm4c123x_hal::delay::Delay;
 use tm4c123x_hal::eeprom::{
     Blocks, Eeprom, EepromAddress, EepromError, Erase, Read, Write as EepromWrite,
 };
 use tm4c123x_hal::gpio::GpioExt;
+use tm4c123x_hal::interrupt::*;
 use tm4c123x_hal::sysctl::SysctlExt;
 use tm4c123x_hal::time::{Instant, MonoTimer};
+use tm4c123x_hal::Peripherals;
 use tm4c123x_hal::{self as hal, prelude::*};
 
-// use postcard::{from_bytes, to_vec};
 use core::alloc::GlobalAlloc;
 use core::alloc::Layout;
 use core::ffi::c_void;
 use core::panic::PanicInfo;
-use heapless::LinearMap;
-use heapless::String;
-use heapless::Vec;
+
 
 use serde::Serializer;
-
 use serde_json_core::ser::Serializer as Ser;
 
-#[macro_use]
-extern crate alloc;
+use tm4c123x_hal::prelude::*;
+mod tm4c123x;
 
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
-/*#[panic_handler]
-fn panic(_x: &PanicInfo) -> ! {
+use nb_executor::{Executor,Signals,Events,EventMask,Mpmc,Park,Parked};
+use futures::{FutureExt,Future,};
+use futures::task::{Context, Poll,ArcWake};
+use futures::join;
+use bitflags::bitflags;
+// use futures::select;
+//use core::future::join;
+use tm4c123x::*;
+use heapless::{Arc,Vec};
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
     loop {}
-}*/
+}
 
-fn crc_calc(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0xFFFF;
-    for i in 0..data.len() {
-        crc ^= data[i] as u16;
-        for _j in 0..8 {
-            if crc & 1 == 1 {
-                crc = (crc >> 1) ^ 0xA001;
-            } else {
-                crc = crc >> 1;
-            }
-        }
+fn park_test(park: Park<'_>) -> Parked {
+    let parked = park.race_free();
+    assert!(!parked.is_idle());
+    parked
+}
+
+bitflags! {
+    struct Ev: u32 {
+        const A = 1 << 3;
+        const B = 1 << 11;
+        const C = 1 << 17;
+        const ALL = Self::A.bits | Self::B.bits | Self::C.bits;
     }
-    crc
+}
+
+impl EventMask for Ev {
+    fn as_bits(self) -> u32 {
+        self.bits()
+    }
+}
+
+impl ArcWake for Events<Ev> {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.raise(Ev::ALL)
+    }
 }
 
 #[entry]
 fn main() -> ! {
-    {
-        use core::mem::MaybeUninit;
-        const HEAP_SIZE: usize = 10240;
-        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
-        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
-    }
+    let events = Events::default();
+    let signals = events.watch();
+
+    let queue = Mpmc::<_, 4>::new();
+
+    let producer = async {
+        for n in 0..32 {
+            queue.enqueue(n, &signals, Ev::A).await;
+        }
+    };
+
+    let consumer = async {
+        for n in 0..32 {
+            assert_eq!(queue.dequeue(&signals, Ev::A).await, n);
+        }
+
+        assert_eq!(queue.inner().dequeue(), None);
+    };
+
+    let future = async { join!(producer, consumer) };
+    signals.bind().block_on(future, park_test);
+
     let p = hal::Peripherals::take().unwrap();
     let cp = cortex_m::Peripherals::take().unwrap();
 
@@ -79,9 +116,14 @@ fn main() -> ! {
     let clocks = sysctl.clock_setup.freeze();
 
     let mut portf = p.GPIO_PORTF.split(&sysctl.power_control);
+    let porte = p.GPIO_PORTE.split(&sysctl.power_control);
     let mut pin_red = portf.pf1.into_push_pull_output();
     let mut pin_blue = portf.pf2.into_push_pull_output();
     let mut pin_green = portf.pf3.into_push_pull_output();
+    let mut pin_uext1 = porte.pe2.into_push_pull_output();
+    let mut pin_uext2 = porte.pe3.into_push_pull_output();
+    pin_uext1.set_low();
+    pin_uext2.set_low();
     //let mut ctrl = portf.control;
     let switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
     let switch1 = portf.pf4.into_pull_up_input();
@@ -148,86 +190,17 @@ fn main() -> ! {
     }
 }
 
-/*   let mut eeprom = Eeprom::new(p.EEPROM, &sc.power_control);
-
-match eeprom_test_all(&mut eeprom) {
-    Ok(_) => {
-        // Huzzah!
-    }
-    Err(code) => {
-        panic!("Error detected while testing EEPROM: {}", code);
-    }
-}*/
-/*
-pub fn eeprom_test_write_read(
-    eeprom: &mut Eeprom,
-    address: &EepromAddress,
-    data_to_write: &[u8],
-    read_buffer: &mut [u8],
-) -> Result<(), EepromError> {
-    eeprom.write(address, &data_to_write)?;
-    eeprom.read(address, data_to_write.len(), read_buffer)?;
-
-    for (i, byte) in data_to_write.iter().enumerate() {
-        assert_eq!(*byte, read_buffer[i], "Read data differs from written data");
-    }
-
-    Ok(())
-}
-
-pub fn eeprom_test_all(eeprom: &mut Eeprom) -> Result<(), EepromError> {
-    let mut buffer = [0 as u8; 64]; // 64 byte read buffer
-
-    // Sanity check for simple mapping from word offset to an EepromAddress
-    let mut address = eeprom.word_index_to_address(52).unwrap();
-    assert_eq!(address.block(), 3, "Word 52 should be in block 3, offset 4");
-    assert_eq!(
-        address.offset(),
-        4,
-        "Word 52 should be in block 3, offset 4"
-    );
-
-    // Sanity check for EepromAddress to word offset
-    let word_index = eeprom.address_to_word_index(&address).unwrap();
-    assert_eq!(
-        word_index, 52,
-        "Word index for block 3, offset 4 should be 52"
-    );
-
-    // Simplest case, middle of a block, no straddle
-    let test_array_1: [u8; 4] = [1, 2, 3, 4];
-    eeprom_test_write_read(eeprom, &mut address, &test_array_1, &mut buffer)?;
-
-    // Test boundry conditions for access that straddles a block
-    let test_array_2: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    let address_straddle_block = EepromAddress::new(0, 15);
-    eeprom_test_write_read(eeprom, &address_straddle_block, &test_array_2, &mut buffer)?;
-
-    eeprom.erase(&address_straddle_block, test_array_2.len())?;
-    eeprom.read(&address_straddle_block, test_array_2.len(), &mut buffer)?;
-    for i in 0..test_array_2.len() {
-        assert_eq!(buffer[i], 0, "Buffer should be all 0's")
-    }
-
-    // Test the block erase using the straddle address and data
-    eeprom.write(&address_straddle_block, &test_array_2)?;
-    eeprom.erase_block(0)?;
-    eeprom.read(&address_straddle_block, test_array_2.len(), &mut buffer)?;
-    for i in 0..test_array_2.len() {
-        match i {
-            0..=3 => {
-                assert_eq!(buffer[i], 0, "Buffer[0..3] should be all 0's");
-            }
-            _ => {
-                assert_eq!(
-                    buffer[i], test_array_2[i],
-                    "Buffer[4..9] should match test_array_2"
-                )
+fn crc_calc(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for i in 0..data.len() {
+        crc ^= data[i] as u16;
+        for _j in 0..8 {
+            if crc & 1 == 1 {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc = crc >> 1;
             }
         }
     }
-
-    Ok(())
+    crc
 }
-
-*/

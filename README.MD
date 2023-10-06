@@ -18,3 +18,21 @@ This is a simple  project for the [Stellaris Launchpad](http://www.ti.com/tool/e
 - [Olimex Stellaris UEXT product page](https://www.olimex.com/Products/Modules/Adapters/STELLARIS-UEXT/open-source-hardware)
 - [Olimex Stellaris UEXT Schematic](https://www.olimex.com/Products/Modules/Adapters/STELLARIS-UEXT/resources/STELLARIS-UEXT_sch.pdf)
 
+# Embassy ( on hold ) 
+
+## RUST setup embassy 
+```sh
+rustup target add thumbv7em-none-eabihf
+rustup toolchain install nightly
+rustup default nightly
+```
+
+## Encountered issues 
+- most JSON serializer use std
+- embassy on a not officially supported board is a bit of a pain to get working
+- embassy timers drags in a lot of dependencies , if you don't have a stm32 or nrf52 board you are basically out of luck
+
+# RTIC
+
+
+
