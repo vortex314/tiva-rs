@@ -38,5 +38,28 @@ rustup default nightly
 # spin_on
 - very simple, but also very limited
 
+## std on microcontroller
+- [Excellent article](https://blog.timhutt.co.uk/std-embedded-rust/index.html)
 
+```shell
+rustup target add thumbv7em-none-eabihf
+rustup +nightly target add thumbv7m-none-eabihf
+# build
+cargo +nightly run --release
+# list all targets
+rustc --print target-list
+cargo +nightly build -Z build-std=std,panic_abort --target thumbv7em-none-eabihf
+```
+This works fine, but the resulting binary is 247kB in size for an empty program, which is a bit too much for a microcontroller with 256KB of flash.
+- Build with std and panic_abort
+```shell
+   text    data     bss     dec     hex filename
+ 247692      28      56  247776   3c7e0 target/thumbv7em-none-eabihf/debug/tiva-rs
+```
+- Build with no_std
+```shell
+   text    data     bss     dec     hex filename
+  36480       0       4   36484    8e84 target/thumbv7em-none-eabihf/debug/tiva-rs
+```
+Build with 
 

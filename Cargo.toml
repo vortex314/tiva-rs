@@ -11,26 +11,25 @@ version = "0.1.0"
 alloc_error_handler = []
 
 [dependencies]
+# HAL PAC 
 cortex-m = { version = "0.7.6", features = ["critical-section-single-core"]}
-cortex-m-rt = { version = "0.7",features = ["device"] }
+cortex-m-rt = { version = "0.7.3",features = ["device"] }
 cortex-m-semihosting = "0.5"
-# panic-halt = "0.2.0"
-# panic-rtt-target = { version = "0.1.2", features = ["cortex-m"] }
+embedded-hal = "0.2.7"
+tm4c-hal = { version="0.4.2" }
+tm4c123x= { version="0.9.2",features=["rt"] }
+tm4c123x-hal = { version="0.10.3",features=["rt"] }
 rtt-target = { version = "0.4.0" }
+# HEAP 
 embedded-alloc="*"
+# SERIALIZATION 
 serde-json-core = "0.5.1"
 serde_derive = {version="1.0", default_features = false}
 serde = { version = "1.0", default-features = false }
-embedded-hal = "0.2.7"
-tm4c123x= { version="0.9.2",features=["rt"] }
-tm4c123x-hal = { version="0.10.3",features=["rt"] }
-# tm4c-hal="0.4.2"
-nb-executor = { version= "0.4.2",features=["heapless"] }
-bitflags = "2.4.0"
-futures = { version = "0.3.21", default-features = false ,features = ["async-await","alloc"] }
-heapless = { version = "0.7.16",  features = ["mpmc_large"] }
-spin_on = "*"
-pasts={ version="*", default_features=false}
+# ASYNC
+pasts = { version="0.14.3",default-features=false }
+futures = { version="0.3.17",default-features=false }
+embedded-async-timer = { version="0.1.0",default-features=false }
 
 [dependencies.linked_list_allocator]
 default-features = false
@@ -41,4 +40,4 @@ features = ["const_mut_refs"]
 opt-level = 0
 
 [profile.release]
-opt-level = 3
+opt-level = "s"

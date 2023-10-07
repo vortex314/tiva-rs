@@ -17,6 +17,9 @@
                 "build",
                 "--target",
                 "thumbv7em-none-eabihf",
+//                "-Z",
+//                "build-std=std,panic_abort",
+//                "build-std=core,alloc",
 //                "--release"
             ],
             "group": {
