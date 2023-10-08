@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(noop_waker)]
 #![no_main]
 #![allow(deprecated)]
 #![allow(unused_imports)]
@@ -8,13 +9,12 @@
 use core::fmt::Write;
 use core::ops::Deref;
 // use alloc::task;
+use cortex_m::peripheral::SYST;
 use cortex_m::peripheral::{DWT, SCB};
 use cortex_m::{delay, interrupt};
-use cortex_m::peripheral::SYST;
 use cortex_m_rt::entry;
-use cortex_m_rt::interrupt;
 use cortex_m_rt::exception;
-
+use cortex_m_rt::interrupt;
 
 use tm4c123x_hal::delay::Delay;
 use tm4c123x_hal::eeprom::{
@@ -40,18 +40,17 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use cortex_m::interrupt::Mutex;
 use core::option::Option::Some;
+use cortex_m::interrupt::Mutex;
 
 use core::future::Future;
+use core::task::Poll::{Pending, Ready};
+use core::task::{Context, RawWaker, Waker};
 use core::time::Duration;
 use pasts::prelude::*;
 use pasts::Executor;
-use core::task::{Context, RawWaker,Waker};
-use core::task::Poll::{Pending, Ready};
 
-use core::{
-    pin::Pin,};
+use core::pin::Pin;
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
@@ -69,7 +68,7 @@ fn heap_setup() {
 
 // SYSTICK clock setup
 
-use cortex_m_rt::Exception::SysTick; 
+use cortex_m_rt::Exception::SysTick;
 
 // clock at 80 Mhz
 // max reload systick value 0x00FF_FFFF = 16_777_215
@@ -80,27 +79,28 @@ use cortex_m_rt::Exception::SysTick;
 // reload =   500_000 => 160 Hz => 6.25 ms
 // reload for 1 ms => 80_000
 
-const RELOAD_VALUE : u32 = 80_000;
+const RELOAD_VALUE: u32 = 80_000;
 
-fn systick_setup(core:cortex_m::Peripherals) {
+fn systick_setup(core: cortex_m::Peripherals) {
     let mut syst = core.SYST;
     syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
-    syst.set_reload(RELOAD_VALUE-1);
+    syst.set_reload(RELOAD_VALUE - 1);
     syst.clear_current();
     syst.enable_counter();
     syst.enable_interrupt();
 }
-static mut TIMER : u64 = 0;
+static mut TIMER: u64 = 0;
 
 #[exception]
 fn SysTick() {
-    unsafe { TIMER += 1; }
+    unsafe {
+        TIMER += 1;
+    }
 }
 
 fn get_clock_msec() -> u64 {
-
     unsafe { TIMER }
- /*    interrupt::free(|cs| unsafe {     
+    /*    interrupt::free(|cs| unsafe {
     //    let mut timer = (RELOAD_VALUE as u64 - SYST::get_current() as u64)/80;
         TIMER
     })*/
@@ -114,29 +114,21 @@ struct Timer {
 impl Timer {
     fn new(duration: u64) -> Self {
         Timer {
-            expiration: get_clock_msec()+duration,
+            expiration: get_clock_msec() + duration,
             duration,
         }
     }
-    async fn poll(mut self, _cx: &mut Context<'_>) -> Poll<()> {
+    async fn poll(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
         if self.expiration > get_clock_msec() {
-            
-            return Poll::Pending;
+            Poll::Pending
         } else {
-            self.expiration = get_clock_msec()+self.duration;
-                return Poll::Ready(())
-        } 
+            self.expiration = get_clock_msec() + self.duration;
+            Poll::Ready(())
+        }
     }
 }
 
 use core::task::Waker as WakerTrait;
-use futures::waker::waker_fn;
-struct NoopWaker {}
-
-impl ArcWake for NoopWaker {
-    fn wake_by_ref(self) {}
-}
-
 
 #[entry]
 fn main() -> ! {
@@ -172,15 +164,16 @@ fn main() -> ! {
     let mut porta = p.GPIO_PORTA.split(&sysctl.power_control);
     let buffer = &mut [0u8; 100];
 
-    let mut timer = Timer::new(1000);
-    executor.block_on(async move {
+
+
+    /*executor.spawn_notify(async move {
+        let mut timer: Timer = Timer::new(1000);
         loop {
             timer.poll(&mut Context::from_waker(&noopWaker)).await;
             pin_red.set_high();
             timer.poll(&mut Context::from_waker(&noopWaker)).await;
             pin_red.set_low();
-        }
-    });
+        };});*/
 
     // Activate UART
     let uart = hal::serial::Serial::uart0(
@@ -208,7 +201,7 @@ fn main() -> ! {
         let _s = String::from("pub");
         seq.serialize_element("pub").unwrap();
         seq.serialize_element("src/tiva/sys/loopback").unwrap();
-        let u = get_clock_msec() ;
+        let u = get_clock_msec();
         let msec = u % 1000;
         let sec = (u / 1000) % 60;
         let min = (u / 60000) % 60;
@@ -224,7 +217,6 @@ fn main() -> ! {
         let crc = crc_calc(buffer);
         tx.write_all(&buffer);
         tx.write_fmt(format_args!("{:04X}\r\n", crc)).unwrap();
-
 
         let now = get_clock_msec() as i64;
         while get_clock_msec() as i64 - now < 1000 {
