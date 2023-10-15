@@ -56,9 +56,9 @@ impl Led {
         }
     }
     pub async fn run(&mut self) -> Infallible {
-        loop {
-        self.blink().await;
-        self.on_cmd().await;
-        }
+  //      loop {
+        self.blink().await
+  //      self.on_cmd().await;
+  //      }
     }
 }
