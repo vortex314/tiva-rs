@@ -70,7 +70,7 @@ fn main() -> ! {
     );
     let clocks = sysctl.clock_setup.freeze();
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
-    let mut tmc = device::CorePeripherals::take().unwrap();
+ //   let mut tmc = device::CorePeripherals::take().unwrap();
     // systick_setup(&cp);
     lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
 
@@ -118,14 +118,14 @@ fn main() -> ! {
         }
     });
 
-    let mut led = led::Led::new(pin_red);
+    let mut led = led::Led::new(& mut pin_red);
     let led_task = core::pin::pin!(led.run());
 
  //   let blink = core::pin::pin!(blink_led(pin_red));
 
     let uart_sender = core::pin::pin!(uart_sender(uart));
     lilos::exec::run_tasks(
-        &mut [led_task, uart_sender, switcher], // <-- array of tasks
+        &mut [ led_task], // <-- array of tasks
         lilos::exec::ALL_TASKS,              // <-- which to start initially
     );
 }
@@ -157,12 +157,12 @@ async fn uart_sender(
     >,
 ) -> Infallible {
     let (mut tx, _rx) = uart0.split();
-    let buffer: &mut [u8; 100] = &mut [0u8; 100];
     const PERIOD: lilos::time::Millis = lilos::time::Millis(500);
     let mut gate = PeriodicGate::from(PERIOD);
     let tick_time = TickTime::now();
 
     loop {
+        let buffer: &mut [u8; 100] = &mut [0u8; 100];
         let mut serializer = Ser::new(buffer);
         let mut seq = serializer.serialize_seq(Some(3)).unwrap();
         let _s = String::from("pub");

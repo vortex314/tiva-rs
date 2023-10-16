@@ -4,7 +4,7 @@ use core::cell::RefCell;
 use core::convert::Infallible;
 use cortex_m::interrupt::free;
 use cortex_m::interrupt::Mutex;
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::v1::OutputPin;
 
 use core::pin::pin;
 use futures::select_biased;
@@ -15,15 +15,17 @@ use thingbuf as conn;
 use tm4c123x_hal as hal;
 use tm4c123x_hal::gpio::Output;
 use tm4c123x_hal::gpio::PushPull;
-pub struct Led {
-    pin: hal::gpio::gpiof::PF1<Output<PushPull>>,
+
+
+pub struct Led<'a> {
+    pin: &'a mut  dyn OutputPin,
     gate: PeriodicGate,
     recv_cmd: conn::mpsc::Receiver<bool>,
     send_cmd: conn::mpsc::Sender<bool>,
     active: bool,
 }
-impl Led {
-    pub fn new(pin: hal::gpio::gpiof::PF1<Output<PushPull>>) -> Self {
+impl<'a> Led<'a> {
+    pub fn new(pin: &'a mut dyn OutputPin ) -> Self {
         let (send_cmd, recv_cmd) = conn::mpsc::channel::<bool>(10);
         let gate = PeriodicGate::from(lilos::time::Millis(500));
         Self {
