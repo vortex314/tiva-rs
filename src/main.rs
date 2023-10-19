@@ -49,17 +49,23 @@ fn panic(_info: &PanicInfo) -> ! {
 use embedded_alloc::Heap;
 #[global_allocator]
 static ALLOCATOR: Heap = Heap::empty();
-const HEAP_SIZE: usize = 10240; // in bytes              // 👈
+const HEAP_SIZE: usize = 10240; // in bytes             
 fn heap_setup() {
     unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
 }
 
 mod led;
+mod limero;
+use limero::{TimeClient, TIME_SERVER};
+use limero::TimerServer;
+
 
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
     heap_setup();
+    unsafe { TIME_SERVER= Some(TimerServer::new()); };
+
     let (tx, rx) = conn::mpsc::channel::<String>(10);
     let mut peripherals = hal::Peripherals::take().unwrap();
     let mut sysctl = peripherals.SYSCTL.constrain();

@@ -1,34 +1,10 @@
 use core::convert::Infallible;
 use embedded_hal::digital::v1::OutputPin;
 use thingbuf as conn;
+use crate::limero::{TimeClient, TIME_SERVER, get_time_server};
 use alloc::vec::Vec;
+use alloc::boxed::Box;
 
-trait TimeClient {
-    fn on_timer(&mut self,timer_id: u32);
-}
-enum TimeServerMsg {
-    WakeMsg,
-    Interval(u32),
-    Gate(u32),
-}
-
-struct TimerServer<'a> {
-    clients : Vec<&'a mut dyn TimeClient>,
-}
-
-impl<'a> TimerServer<'a> {
-    fn new_interval(&mut self, interval: u32,client:&'a mut dyn TimeClient) {
-        self.clients.push(client);
-    }
-
-    fn new_gate(&mut self, interval: u32,client:&'a mut dyn TimeClient) {
-        self.clients.push(client);
-    }
-
-    fn one_shot(&mut self, interval: u32,client:&'a mut dyn TimeClient) {
-        self.clients.push(client);
-    }
-}
 
 #[derive(Clone, Debug)]
 pub enum LedMsg {
@@ -61,6 +37,7 @@ impl TimeClient for Led<'_> {
 impl<'a> Led<'a> {
     pub fn new(pin: &'a mut dyn OutputPin) -> Self {
         let (send_main, recv_main) = conn::mpsc::channel::<LedMsg>(10);
+        
         Self {
             pin,
             led_state: false,
@@ -93,6 +70,7 @@ impl<'a> Led<'a> {
     }
 
     pub async fn run(&mut self) -> Infallible {
+        get_time_server().new_interval(500,  self);
         loop {
             let msg = self.recv_main.recv().await;
             if let Some(m) = msg {
