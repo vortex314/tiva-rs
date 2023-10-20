@@ -14,19 +14,19 @@ use core::fmt::Write;
 use lilos::time::TickTime;
 use tm4c123x as device;
 
-use tm4c123x_hal::gpio::GpioExt;
-use tm4c123x_hal::sysctl::SysctlExt;
-use tm4c123x_hal::{self as hal, prelude::*};
 use tm4c123x_hal::gpio::gpioa::PA0;
 use tm4c123x_hal::gpio::gpioa::PA1;
 use tm4c123x_hal::gpio::AlternateFunction;
-use tm4c123x_hal::gpio::PushPull;
+use tm4c123x_hal::gpio::GpioExt;
 use tm4c123x_hal::gpio::Output;
+use tm4c123x_hal::gpio::PushPull;
 use tm4c123x_hal::gpio::AF1;
 use tm4c123x_hal::serial::Serial;
+use tm4c123x_hal::sysctl::SysctlExt;
+use tm4c123x_hal::{self as hal, prelude::*};
 
-use core::panic::PanicInfo;
 use alloc::string::String;
+use core::panic::PanicInfo;
 
 use serde::ser::SerializeSeq;
 use serde::Serializer;
@@ -35,10 +35,9 @@ use serde_json_core::ser::Serializer as Ser;
 extern crate alloc;
 use core::option::Option::Some;
 
-
+use crate::limero::get_time_server;
 use lilos::exec::PeriodicGate;
 use thingbuf as conn;
-
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
@@ -49,22 +48,22 @@ fn panic(_info: &PanicInfo) -> ! {
 use embedded_alloc::Heap;
 #[global_allocator]
 static ALLOCATOR: Heap = Heap::empty();
-const HEAP_SIZE: usize = 10240; // in bytes             
+const HEAP_SIZE: usize = 10240; // in bytes
 fn heap_setup() {
     unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
 }
 
 mod led;
 mod limero;
-use limero::{TimeClient, TIME_SERVER};
 use limero::TimerServer;
-
-
+use limero::{TimerClient, TIMER_SERVER};
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
     heap_setup();
-    unsafe { TIME_SERVER= Some(TimerServer::new()); };
+    unsafe {
+        TIMER_SERVER = Some(TimerServer::new());
+    };
 
     let (tx, rx) = conn::mpsc::channel::<String>(10);
     let mut peripherals = hal::Peripherals::take().unwrap();
@@ -76,7 +75,7 @@ fn main() -> ! {
     );
     let clocks = sysctl.clock_setup.freeze();
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
- //   let mut tmc = device::CorePeripherals::take().unwrap();
+    //   let mut tmc = device::CorePeripherals::take().unwrap();
     // systick_setup(&cp);
     lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
 
@@ -124,21 +123,22 @@ fn main() -> ! {
         }
     });
 
-    let mut led = led::Led::new(& mut pin_red);
+    let mut led = led::Led::new(&mut pin_red);
     let led_task = core::pin::pin!(led.run());
+    let timer_server_task = core::pin::pin!(get_time_server().run());
 
- //   let blink = core::pin::pin!(blink_led(pin_red));
+    //   let blink = core::pin::pin!(blink_led(pin_red));
 
     let uart_sender = core::pin::pin!(uart_sender(uart));
     lilos::exec::run_tasks(
-        &mut [ led_task], // <-- array of tasks
-        lilos::exec::ALL_TASKS,              // <-- which to start initially
+        &mut [timer_server_task, led_task], // <-- array of tasks
+        lilos::exec::ALL_TASKS,                                    // <-- which to start initially
     );
 }
 
 fn crc_calc(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
-    for b  in data.iter() {
+    for b in data.iter() {
         crc ^= *b as u16;
         for _j in 0..8 {
             if crc & 1 == 1 {
@@ -150,8 +150,6 @@ fn crc_calc(data: &[u8]) -> u16 {
     }
     crc
 }
-
-
 
 async fn uart_sender(
     uart0: Serial<
@@ -174,7 +172,7 @@ async fn uart_sender(
         let _s = String::from("pub");
         seq.serialize_element("pub").unwrap();
         seq.serialize_element("src/tiva/sys/loopback").unwrap();
-        let u = tick_time.elapsed().0 ;
+        let u = tick_time.elapsed().0;
         let msec = u % 1000;
         let sec = (u / 1000) % 60;
         let min = (u / 60000) % 60;

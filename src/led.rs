@@ -1,13 +1,14 @@
+use core::cell::Cell;
 use core::convert::Infallible;
 use embedded_hal::digital::v1::OutputPin;
 use thingbuf as conn;
-use crate::limero::{TimeClient, TIME_SERVER, get_time_server};
+use crate::limero::{TimerClient, TIMER_SERVER, get_timer_server,TimerMsg::Wake};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 
-
 #[derive(Clone, Debug)]
 pub enum LedMsg {
+    TimerMsg::Wake,
     On,
     Off,
     Interval(u32),
@@ -28,8 +29,8 @@ pub struct Led<'a> {
     active: bool,
 }
 
-impl TimeClient for Led<'_> {
-    fn on_timer(&mut self, timer_id: u32) {
+impl TimerClient for Led<'_> {
+    fn on_timer(& self, timer_id: u32) {
         let _ = self.send_main.send(LedMsg::BlinkTimer);
     }
 }
@@ -70,7 +71,7 @@ impl<'a> Led<'a> {
     }
 
     pub async fn run(&mut self) -> Infallible {
-        get_time_server().new_interval(500,  self);
+        get_timer_server().new_interval(500,  self.send_main.clone());
         loop {
             let msg = self.recv_main.recv().await;
             if let Some(m) = msg {
