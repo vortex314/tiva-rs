@@ -16,5 +16,18 @@
             "runToEntryPoint": "main",
             "showDevDebugOutput": "none"
         },
+        {
+            "name": "GDB",
+            "type": "gdb",
+            "request": "launch",
+            "cwd": "${workspaceRoot}",
+            "target": "${workspaceRoot}/target/thumbv7em-none-eabihf/debug/tiva-rs",
+            "gdbpath" : "C:/STM32Toolchain/gcc-arm/5.4 2016q3/bin/arm-none-eabi-gdb.exe",
+            "autorun": [
+                "target remote localhost:3333",
+                "symbol-file ./.pioenvs/nucleo_f303k8/firmware.elf",
+                "monitor reset"
+                ]
+        }
     ]
 }

@@ -12,7 +12,7 @@ alloc_error_handler = []
 
 [dependencies]
 # HAL PAC 
-cortex-m = { version = "0.7.6", features = ["critical-section-single-core"]}
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"]}
 cortex-m-rt = { version = "0.7.3",features = ["device"] }
 cortex-m-semihosting = "0.5"
 embedded-hal = "0.2.7"

@@ -1,10 +1,88 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use cortex_m_semihosting::hprintln;
 use core::convert::Infallible;
 use core::time::Duration;
+//use core::fmt::Debug;
 use lilos::exec::sleep_until;
 use lilos::time::TickTime;
-use thingbuf::mpsc::Sender;
+use thingbuf::mpsc::channel;
+use thingbuf::mpsc::{Receiver, Sender};
+
+pub struct Sink<T: Default + Clone> {
+    receiver: Receiver<T>,
+    sender: Sender<T>,
+}
+
+impl<T: Default + Clone> Sink<T> {
+    pub fn new(size: usize) -> Self {
+        let (sender, receiver) = channel(size);
+        Sink { receiver, sender }
+    }
+    pub async fn recv_async(&mut self) -> T {
+        self.receiver.recv_ref().await.unwrap().clone()
+    }
+    pub async fn recv(&mut self) -> T {
+        self.receiver.recv().await.unwrap()
+    }
+    pub fn sender(&self) -> Sender<T> {
+        self.sender.clone()
+    }
+}
+#[derive(Clone)]
+
+struct Source<T> {
+    senders: Vec<Sender<T>>,
+}
+
+impl<T: Default + Clone> Source<T>
+where
+    T: Clone + Send + 'static,
+{
+    fn new() -> Self {
+        Source {
+            senders: Vec::new(),
+        }
+    }
+    /*async fn emit_async(&mut self, item: T) -> Result<(), SendError<T>> {
+        for sender in self.senders.iter() {
+            sender.send_async(item.clone()).await.unwrap()  ;
+        }
+        Ok(())
+    }*/
+    fn emit(&self, item: T) {
+        for sender in self.senders.iter() {
+            //println!("emit()  {:?}", item.clone());
+            let _ = sender.send(item.clone());
+        }
+    }
+}
+
+struct TimerSource {
+    source: Source<()>,
+    interval: Duration,
+    active: bool,
+}
+
+impl TimerSource {
+    fn new() -> Self {
+        TimerSource {
+            source: Source::new(),
+            interval: Duration::from_secs(1),
+            active: false,
+        }
+    }
+    fn interval(&mut self, interval: Duration) -> &mut Self {
+        self.interval = interval;
+        self
+    }
+    async fn run(&mut self) -> () {
+        loop {
+            let _ = self.source.emit(());
+            //           tokio::time::sleep(self.interval).await;
+        }
+    }
+}
 
 pub static mut TIMER_SERVER: Option<TimerServer> = None;
 
@@ -15,40 +93,29 @@ pub fn init() {
 }
 
 pub fn get_timer_server() -> &'static mut TimerServer {
-    unsafe {
-        if TIMER_SERVER.is_none() {
-            init();
-        }
-        TIMER_SERVER.as_mut().unwrap()
-    }
+    unsafe { TIMER_SERVER.as_mut().unwrap() }
 }
 
 pub trait TimerClient {
     fn on_timer(&self, timer_id: u32);
 }
 
-pub enum TimerMsg {
-    Wake
-}
-
-impl Default for TimerMsg {
-    fn default() -> Self {
-        TimerMsg::Wake
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Default)]
+pub struct TimerMsg {}
+
+#[derive( PartialEq,Debug)]
 enum TimerType {
     Interval,
     Gate,
     OneShot,
 }
 
+#[derive(  Debug)] 
 struct TimerEntry {
     kind: TimerType,
     interval: Duration,
-    client: Sender<TimerMsg>,
-    timer_id: u32,
+    client: Box<Sender<TimerMsg>>,
     repeat: bool,
     expires_at: TickTime,
 }
@@ -63,44 +130,37 @@ impl TimerServer {
             clients: Vec::new(),
         }
     }
-    pub fn new_interval(&mut self, interval: u32, client: Sender <TimerMsg>) {
+    pub fn new_interval(&mut self, interval: u32, client: Sender<TimerMsg> ) {
         let te = TimerEntry {
             kind: TimerType::Interval,
             interval: Duration::from_millis(interval as u64),
-            client,
-            timer_id: 0,
+            client:Box::new(client),
             repeat: true,
             expires_at: TickTime::now() + Duration::from_millis(interval as u64),
         };
         self.clients.push(te);
     }
 
-    pub fn new_gate(&mut self, interval: u32, client: Sender <TimerMsg>) {
+    pub fn new_gate(&mut self, interval: u32,  client: Sender<TimerMsg>) {
         let te = TimerEntry {
             kind: TimerType::Gate,
             interval: Duration::from_millis(interval as u64),
-            client,
-            timer_id: 0,
+            client: Box::new(client),   
             repeat: true,
             expires_at: TickTime::now() + Duration::from_millis(interval as u64),
         };
         self.clients.push(te);
     }
 
-    pub fn one_shot(&mut self, interval: u32,  client: Sender <TimerMsg>) {
+    pub fn one_shot(&mut self, interval: u32,  client: Sender<TimerMsg>) {
         let te = TimerEntry {
             kind: TimerType::OneShot,
             interval: Duration::from_millis(interval as u64),
-            client,
-            timer_id: 0,
+            client: Box::new(client),
             repeat: false,
             expires_at: TickTime::now() + Duration::from_millis(interval as u64),
         };
         self.clients.push(te);
-    }
-
-    pub fn cancel(&mut self, timer_id: u32) {
-        self.clients.retain(|te| te.timer_id != timer_id);
     }
 
     pub fn cancel_all(&mut self) {
@@ -111,10 +171,10 @@ impl TimerServer {
         loop {
             let deadline = self.find_next_expiration();
             sleep_until(deadline).await;
-            let now = TickTime::now();
+            let mut now = TickTime::now();
             for te in self.clients.iter_mut() {
-                if te.expires_at < now {
-                    te.client.send(TimerMsg::Wake).unwrap( );
+                if te.expires_at <= now {
+                    let _r = te.client.send(TimerMsg{}).await.unwrap()  ;
                     if te.repeat && te.kind == TimerType::Interval {
                         te.expires_at = now + te.interval;
                     } else if te.repeat && te.kind == TimerType::Gate {
@@ -129,7 +189,7 @@ impl TimerServer {
 
     // search all timerentries for the next expiration time
     pub fn find_next_expiration(&mut self) -> TickTime {
-        let mut exp = TickTime::now() + Duration::from_secs(1);
+        let mut exp = TickTime::now() + Duration::from_secs(1); // 1 sec default as max start
         for te in self.clients.iter_mut() {
             if te.expires_at < exp {
                 exp = te.expires_at;

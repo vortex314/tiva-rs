@@ -1,57 +1,37 @@
 use core::cell::Cell;
 use core::convert::Infallible;
+use cortex_m_semihosting::hprintln;
 use embedded_hal::digital::v1::OutputPin;
+use futures::select_biased;
 use thingbuf as conn;
-use crate::limero::{TimerClient, TIMER_SERVER, get_timer_server,TimerMsg::Wake};
+use crate::limero::{Sink,TimerClient, TIMER_SERVER, get_timer_server,TimerMsg};
 use alloc::vec::Vec;
-use alloc::boxed::Box;
+use futures::FutureExt;
 
-#[derive(Clone, Debug)]
-pub enum LedMsg {
-    TimerMsg::Wake,
-    On,
-    Off,
-    Interval(u32),
-    BlinkTimer,
-}
-
-impl Default for LedMsg {
-    fn default() -> Self {
-        LedMsg::On
-    }
-}
 
 pub struct Led<'a> {
     pin: &'a mut dyn OutputPin,
     led_state: bool,
-    recv_main: conn::mpsc::Receiver<LedMsg>,
-    send_main: conn::mpsc::Sender<LedMsg>,
     active: bool,
+    timer_tick:Sink<TimerMsg> ,
+    active_sink: Sink<bool>,
 }
 
 impl TimerClient for Led<'_> {
     fn on_timer(& self, timer_id: u32) {
-        let _ = self.send_main.send(LedMsg::BlinkTimer);
     }
 }
 
 impl<'a> Led<'a> {
-    pub fn new(pin: &'a mut dyn OutputPin) -> Self {
-        let (send_main, recv_main) = conn::mpsc::channel::<LedMsg>(10);
-        
+    pub fn new(pin: &'a mut dyn OutputPin) -> Self {     
         Self {
             pin,
             led_state: false,
-            send_main,
-            recv_main,
             active: true,
+            timer_tick: Sink::<TimerMsg>::new(10),
+            active_sink: Sink::<bool>::new(10),
         }
     }
-
-    pub fn on(&mut self, msg: LedMsg) {
-        let _ = self.send_main.send(msg);
-    }
-
     fn toggle(&mut self ){
         if self.active {
             if self.led_state {
@@ -71,17 +51,16 @@ impl<'a> Led<'a> {
     }
 
     pub async fn run(&mut self) -> Infallible {
-        get_timer_server().new_interval(500,  self.send_main.clone());
+        get_timer_server().new_interval(100,  self.timer_tick.sender());
         loop {
-            let msg = self.recv_main.recv().await;
-            if let Some(m) = msg {
-                match m {
-                    LedMsg::On => self.set_active(true),
-                    LedMsg::Off => self.set_active(false),
-                    LedMsg::BlinkTimer => self.toggle(),
-                    LedMsg::Interval(ms) => {}
+            select_biased! {
+                msg = self.active_sink.recv_async().fuse() => {
+                    self.set_active(msg);
+                }
+                _ = self.timer_tick.recv_async().fuse() => {
+                    self.toggle();
                 }
             }
-        }
+        }   
     }
 }

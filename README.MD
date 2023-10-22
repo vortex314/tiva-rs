@@ -63,3 +63,20 @@ This works fine, but the resulting binary is 247kB in size for an empty program,
 ```
 Build with 
 
+## GDB cheat sheet
+
+- (gdb) l - list source code
+- (gdb) b - set breakpoint
+- (gdb) r - run
+- (gdb) c - continue
+- (gdb) n - next
+- (gdb) s - step
+- (gdb) p - print
+- (gdb) bt - backtrace
+- (gdb) i r - info registers
+- (gdb) i r r0 - info register r0
+- (gdb) i r pc - info register pc
+- (gdb) i r sp - info register sp
+- (gdb) i r lr - info register lr
+- (gdb) jump reset - jump to reset
+

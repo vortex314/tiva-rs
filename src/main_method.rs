@@ -7,27 +7,26 @@
 #![allow(unused_mut)]
 
 use core::convert::Infallible;
-use alloc::boxed::Box;
-use cortex_m_semihosting::hprintln;
-use cortex_m_rt::exception;
-use cortex_m_rt::ExceptionFrame;
+use core::fmt::Write;
 // use std::process::Output;
 // use alloc::task;
 
 use lilos::time::TickTime;
+use tm4c123x as device;
 
+use tm4c123x_hal::gpio::GpioExt;
+use tm4c123x_hal::sysctl::SysctlExt;
+use tm4c123x_hal::{self as hal, prelude::*};
 use tm4c123x_hal::gpio::gpioa::PA0;
 use tm4c123x_hal::gpio::gpioa::PA1;
 use tm4c123x_hal::gpio::AlternateFunction;
-use tm4c123x_hal::gpio::GpioExt;
 use tm4c123x_hal::gpio::PushPull;
+use tm4c123x_hal::gpio::Output;
 use tm4c123x_hal::gpio::AF1;
 use tm4c123x_hal::serial::Serial;
-use tm4c123x_hal::sysctl::SysctlExt;
-use tm4c123x_hal::{self as hal, prelude::*};
 
-use alloc::string::String;
 use core::panic::PanicInfo;
+use alloc::string::String;
 
 use serde::ser::SerializeSeq;
 use serde::Serializer;
@@ -36,19 +35,13 @@ use serde_json_core::ser::Serializer as Ser;
 extern crate alloc;
 use core::option::Option::Some;
 
-use crate::limero::get_timer_server;
-use crate::limero::Sink;
-use crate::limero::TimerMsg;
+
+use lilos::exec::PeriodicGate;
 use thingbuf as conn;
+
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {}
-}
-
-#[exception]
-unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
-    hprintln!("{:#?}", ef);
     loop {}
 }
 
@@ -56,25 +49,22 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
 use embedded_alloc::Heap;
 #[global_allocator]
 static ALLOCATOR: Heap = Heap::empty();
-const HEAP_SIZE: usize = 10240; // in bytes
+const HEAP_SIZE: usize = 10240; // in bytes             
 fn heap_setup() {
- //   unsafe { HEAP.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) }
-
     unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
 }
 
 mod led;
 mod limero;
+use limero::{TimeClient, TIME_SERVER};
 use limero::TimerServer;
-use limero::{ TIMER_SERVER};
+
+
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
     heap_setup();
-    unsafe {
-        TIMER_SERVER = Some(TimerServer::new());
-    };
-    
+    unsafe { TIME_SERVER= Some(TimerServer::new()); };
 
     let (tx, rx) = conn::mpsc::channel::<String>(10);
     let mut peripherals = hal::Peripherals::take().unwrap();
@@ -86,7 +76,7 @@ fn main() -> ! {
     );
     let clocks = sysctl.clock_setup.freeze();
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
-    //   let mut tmc = device::CorePeripherals::take().unwrap();
+ //   let mut tmc = device::CorePeripherals::take().unwrap();
     // systick_setup(&cp);
     lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
 
@@ -134,20 +124,22 @@ fn main() -> ! {
         }
     });
 
-    let mut led = led::Led::new(&mut pin_red);
+    let mut led = led::Led::new(& mut pin_red);
     let led_task = core::pin::pin!(led.run());
-    let timer_server_task = core::pin::pin!(get_timer_server().run());
+
+ //   let blink = core::pin::pin!(blink_led(pin_red));
+
     let uart_sender = core::pin::pin!(uart_sender(uart));
     lilos::exec::run_tasks(
-        &mut [timer_server_task, led_task,uart_sender], // <-- array of tasks
-        lilos::exec::ALL_TASKS,                          // <-- which to start initially
+        &mut [ led_task], // <-- array of tasks
+        lilos::exec::ALL_TASKS,              // <-- which to start initially
     );
 }
 
-fn crc_calc(data: &[u8],length:usize) -> u16 {
+fn crc_calc(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
-    for index in 0..length {
-        crc ^= data[index] as u16;
+    for b  in data.iter() {
+        crc ^= *b as u16;
         for _j in 0..8 {
             if crc & 1 == 1 {
                 crc = (crc >> 1) ^ 0xA001;
@@ -159,6 +151,8 @@ fn crc_calc(data: &[u8],length:usize) -> u16 {
     crc
 }
 
+
+
 async fn uart_sender(
     uart0: Serial<
         tm4c123x::UART0,
@@ -169,19 +163,18 @@ async fn uart_sender(
     >,
 ) -> Infallible {
     let (mut tx, _rx) = uart0.split();
+    const PERIOD: lilos::time::Millis = lilos::time::Millis(500);
+    let mut gate = PeriodicGate::from(PERIOD);
     let tick_time = TickTime::now();
-    let mut buffer: Box< [u8; 100]> = Box::new([0u8; 100]);
-    let mut ts = Box::new(Sink::<TimerMsg>::new(2));
-    get_timer_server().new_interval(100, ts.sender());
-    hprintln!("uart_sender started");
+
     loop {
-//        hprintln!("uart_sender loop");
-        ts.recv_async().await;
-       let mut serializer = Ser::new(buffer.as_mut());
-          let mut seq = serializer.serialize_seq(None).unwrap();
-         seq.serialize_element("pub").unwrap();
+        let buffer: &mut [u8; 100] = &mut [0u8; 100];
+        let mut serializer = Ser::new(buffer);
+        let mut seq = serializer.serialize_seq(Some(3)).unwrap();
+        let _s = String::from("pub");
+        seq.serialize_element("pub").unwrap();
         seq.serialize_element("src/tiva/sys/loopback").unwrap();
-        let u = tick_time.elapsed().0;
+        let u = tick_time.elapsed().0 ;
         let msec = u % 1000;
         let sec = (u / 1000) % 60;
         let min = (u / 60000) % 60;
@@ -192,16 +185,22 @@ async fn uart_sender(
         seq.serialize_element(&min).unwrap();
         seq.serialize_element(&sec).unwrap();
         seq.serialize_element(&msec).unwrap();
-        let size = ALLOCATOR.free();
-        seq.serialize_element(&size).unwrap();
         let _ = seq.end();
-        let length = serializer.end();
-        let crc = crc_calc(buffer.as_mut(),length);
-        tx.write_all(&buffer.as_slice()[0..length]);
-        tx.write_all(&['\r' as u8, '\n' as u8]);
-   //     tx.write_all(&buffer.as_mut());
-   //     tx.write_fmt(format_args!("{:04X}\r\n", crc)).unwrap();
+        serializer.end();
+        let crc = crc_calc(buffer);
+        tx.write_all(&buffer);
+        tx.write_fmt(format_args!("{:04X}\r\n", crc)).unwrap();
+        gate.next_time().await;
     }
 }
 
-
+async fn blink_led(mut pin_red: hal::gpio::gpiof::PF1<Output<PushPull>>) -> Infallible {
+    const PERIOD: lilos::time::Millis = lilos::time::Millis(500);
+    let mut gate = PeriodicGate::from(PERIOD);
+    loop {
+        gate.next_time().await;
+        pin_red.set_high();
+        gate.next_time().await;
+        pin_red.set_low();
+    }
+}
