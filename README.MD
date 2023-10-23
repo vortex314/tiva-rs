@@ -69,8 +69,8 @@ Build with
 - (gdb) b - set breakpoint
 - (gdb) r - run
 - (gdb) c - continue
-- (gdb) n - next
-- (gdb) s - step
+- (gdb) n - next - code line by line
+- (gdb) s - step - step into function and next instruction cpu
 - (gdb) p - print
 - (gdb) bt - backtrace
 - (gdb) i r - info registers
@@ -79,4 +79,5 @@ Build with
 - (gdb) i r sp - info register sp
 - (gdb) i r lr - info register lr
 - (gdb) jump reset - jump to reset
+- (gdb) jump main - jump to main
 

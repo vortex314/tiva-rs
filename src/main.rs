@@ -6,11 +6,11 @@
 #![allow(unused_variables)]
 #![allow(unused_mut)]
 
-use core::convert::Infallible;
 use alloc::boxed::Box;
-use cortex_m_semihosting::hprintln;
+use core::convert::Infallible;
 use cortex_m_rt::exception;
 use cortex_m_rt::ExceptionFrame;
+use cortex_m_semihosting::hprintln;
 // use std::process::Output;
 // use alloc::task;
 
@@ -58,16 +58,14 @@ use embedded_alloc::Heap;
 static ALLOCATOR: Heap = Heap::empty();
 const HEAP_SIZE: usize = 10240; // in bytes
 fn heap_setup() {
- //   unsafe { HEAP.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) }
-
     unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
 }
 
 mod led;
-mod uart;
+// mod uart;
 mod limero;
 use limero::TimerServer;
-use limero::{ TIMER_SERVER};
+use limero::TIMER_SERVER;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -75,7 +73,6 @@ fn main() -> ! {
     unsafe {
         TIMER_SERVER = Some(TimerServer::new());
     };
-    
 
     let (tx, rx) = conn::mpsc::channel::<String>(10);
     let mut peripherals = hal::Peripherals::take().unwrap();
@@ -89,7 +86,6 @@ fn main() -> ! {
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
     //   let mut tmc = device::CorePeripherals::take().unwrap();
     // systick_setup(&cp);
-    lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
 
     let tx_pin = porta_parts
         .pa1
@@ -139,13 +135,14 @@ fn main() -> ! {
     let led_task = core::pin::pin!(led.run());
     let timer_server_task = core::pin::pin!(get_timer_server().run());
     let uart_sender = core::pin::pin!(uart_sender(uart));
+    lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
     lilos::exec::run_tasks(
-        &mut [timer_server_task, led_task,uart_sender], // <-- array of tasks
-        lilos::exec::ALL_TASKS,                          // <-- which to start initially
+        &mut [timer_server_task, led_task, uart_sender], // <-- array of tasks
+        0b111,                                           // <-- which to start initially
     );
 }
 
-fn crc_calc(data: &[u8],length:usize) -> u16 {
+fn crc_calc(data: &[u8], length: usize) -> u16 {
     let mut crc: u16 = 0xFFFF;
     for index in 0..length {
         crc ^= data[index] as u16;
@@ -171,16 +168,16 @@ async fn uart_sender(
 ) -> Infallible {
     let (mut tx, _rx) = uart0.split();
     let tick_time = TickTime::now();
-    let mut buffer: Box< [u8; 100]> = Box::new([0u8; 100]);
+    let mut buffer: Box<[u8; 100]> = Box::new([0u8; 100]);
     let mut ts = Box::new(Sink::<TimerMsg>::new(2));
     get_timer_server().new_interval(100, ts.sender());
     hprintln!("uart_sender started");
     loop {
-//        hprintln!("uart_sender loop");
-       let _ = ts.recv().await;
-       let mut serializer = Ser::new(buffer.as_mut());
-          let mut seq = serializer.serialize_seq(None).unwrap();
-         seq.serialize_element("pub").unwrap();
+        //     hprintln!("uart_sender loop");
+        let _ = ts.recv().await;
+        let mut serializer = Ser::new(buffer.as_mut());
+        let mut seq = serializer.serialize_seq(None).unwrap();
+        seq.serialize_element("pub").unwrap();
         seq.serialize_element("src/tiva/sys/loopback").unwrap();
         let u = tick_time.elapsed().0;
         let msec = u % 1000;
@@ -195,14 +192,12 @@ async fn uart_sender(
         seq.serialize_element(&msec).unwrap();
         let size = ALLOCATOR.free();
         seq.serialize_element(&size).unwrap();
-        let _ = seq.end();
+        seq.end().unwrap();
         let length = serializer.end();
-        let crc = crc_calc(buffer.as_mut(),length);
+        let crc = crc_calc(buffer.as_mut(), length);
         tx.write_all(&buffer.as_slice()[0..length]);
         tx.write_all(&['\r' as u8, '\n' as u8]);
-   //     tx.write_all(&buffer.as_mut());
-   //     tx.write_fmt(format_args!("{:04X}\r\n", crc)).unwrap();
+        //     tx.write_all(&buffer.as_mut());
+        //     tx.write_fmt(format_args!("{:04X}\r\n", crc)).unwrap();
     }
 }
-
-
