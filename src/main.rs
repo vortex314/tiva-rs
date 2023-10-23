@@ -64,6 +64,7 @@ fn heap_setup() {
 }
 
 mod led;
+mod uart;
 mod limero;
 use limero::TimerServer;
 use limero::{ TIMER_SERVER};
@@ -176,7 +177,7 @@ async fn uart_sender(
     hprintln!("uart_sender started");
     loop {
 //        hprintln!("uart_sender loop");
-        ts.recv_async().await;
+       let _ = ts.recv().await;
        let mut serializer = Ser::new(buffer.as_mut());
           let mut seq = serializer.serialize_seq(None).unwrap();
          seq.serialize_element("pub").unwrap();

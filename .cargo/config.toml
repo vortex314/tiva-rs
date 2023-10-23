@@ -4,4 +4,4 @@ runner = "qemu-system-arm -cpu cortex-m4 -machine lm3s6965evb -nographic -semiho
 
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-rustflags = ["-C", "link-arg=-Tlink.x","-Z","emit-stack-sizes",]
+rustflags = ["-C", "link-arg=-Tlink.x"]

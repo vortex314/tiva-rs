@@ -1,11 +1,7 @@
-use core::cell::Cell;
 use core::convert::Infallible;
-use cortex_m_semihosting::hprintln;
 use embedded_hal::digital::v1::OutputPin;
 use futures::select_biased;
-use thingbuf as conn;
-use crate::limero::{Sink,TimerClient, TIMER_SERVER, get_timer_server,TimerMsg};
-use alloc::vec::Vec;
+use crate::limero::{Sink,TimerClient, get_timer_server,TimerMsg};
 use futures::FutureExt;
 
 
@@ -13,13 +9,8 @@ pub struct Led<'a> {
     pin: &'a mut dyn OutputPin,
     led_state: bool,
     active: bool,
-    timer_tick:Sink<TimerMsg> ,
-    active_sink: Sink<bool>,
-}
-
-impl TimerClient for Led<'_> {
-    fn on_timer(& self, timer_id: u32) {
-    }
+    pub timer_tick:Sink<TimerMsg> ,
+    pub active_sink: Sink<bool>,
 }
 
 impl<'a> Led<'a> {
@@ -51,13 +42,13 @@ impl<'a> Led<'a> {
     }
 
     pub async fn run(&mut self) -> Infallible {
-        get_timer_server().new_interval(100,  self.timer_tick.sender());
+        get_timer_server().new_gate(100,  self.timer_tick.sender());
         loop {
             select_biased! {
-                msg = self.active_sink.recv_async().fuse() => {
+                msg = self.active_sink.recv().fuse() => {
                     self.set_active(msg);
                 }
-                _ = self.timer_tick.recv_async().fuse() => {
+                _ = self.timer_tick.recv().fuse() => {
                     self.toggle();
                 }
             }

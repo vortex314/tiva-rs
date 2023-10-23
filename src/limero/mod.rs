@@ -6,7 +6,7 @@ use core::time::Duration;
 //use core::fmt::Debug;
 use lilos::exec::sleep_until;
 use lilos::time::TickTime;
-use thingbuf::mpsc::channel;
+use thingbuf::mpsc::{channel, RecvRef};
 use thingbuf::mpsc::{Receiver, Sender};
 
 pub struct Sink<T: Default + Clone> {
@@ -19,8 +19,8 @@ impl<T: Default + Clone> Sink<T> {
         let (sender, receiver) = channel(size);
         Sink { receiver, sender }
     }
-    pub async fn recv_async(&mut self) -> T {
-        self.receiver.recv_ref().await.unwrap().clone()
+    pub async fn recv_ref(&mut self) -> RecvRef<T> {
+        self.receiver.recv_ref().await.unwrap()
     }
     pub async fn recv(&mut self) -> T {
         self.receiver.recv().await.unwrap()
@@ -31,7 +31,7 @@ impl<T: Default + Clone> Sink<T> {
 }
 #[derive(Clone)]
 
-struct Source<T> {
+pub struct Source<T> {
     senders: Vec<Sender<T>>,
 }
 
@@ -39,7 +39,7 @@ impl<T: Default + Clone> Source<T>
 where
     T: Clone + Send + 'static,
 {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Source {
             senders: Vec::new(),
         }
@@ -50,7 +50,7 @@ where
         }
         Ok(())
     }*/
-    fn emit(&self, item: T) {
+    pub fn emit(&self, item: T) {
         for sender in self.senders.iter() {
             //println!("emit()  {:?}", item.clone());
             let _ = sender.send(item.clone());
