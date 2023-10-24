@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 use embedded_hal::digital::v1::OutputPin;
-use futures::select_biased;
-use crate::limero::{Sink,TimerClient, get_timer_server,TimerMsg};
+use futures::{select_biased, future::select};
+use crate::limero::{Sink, get_timer_server,TimerMsg};
 use futures::FutureExt;
 
 

@@ -33,6 +33,9 @@ impl<T: Default + Clone> Sink<T> {
     pub fn sender(&self) -> Sender<T> {
         self.sender.clone()
     }
+    pub fn on(&self, item: T) {
+        let _ = self.sender.send(item);
+    }
 }
 
 pub struct Source<T> {
@@ -94,9 +97,6 @@ pub fn get_timer_server() -> &'static mut TimerServer<'static> {
     }
 }
 
-pub trait TimerClient {
-    fn on_timer(&self, timer_id: u32);
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct TimerMsg {}

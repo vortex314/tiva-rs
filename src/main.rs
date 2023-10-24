@@ -129,6 +129,7 @@ fn main() -> ! {
     });
 
     let mut led = led::Led::new(&mut pin_red);
+    led.active_sink.on(true);
     let led_task = core::pin::pin!(led.run());
     let timer_server_task = core::pin::pin!(get_timer_server().run());
     let uart_sender = core::pin::pin!(uart_sender(uart));
