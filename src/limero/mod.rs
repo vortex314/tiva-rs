@@ -1,18 +1,18 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use cortex_m::interrupt;
-use lilos::create_mutex;
 use core::convert::Infallible;
 use core::time::Duration;
+use cortex_m::interrupt;
 use cortex_m_semihosting::hprintln;
 //use core::fmt::Debug;
+use core::borrow::Borrow;
+use core::pin::{pin, Pin};
 use lilos::exec::sleep_until;
-use lilos::time::TickTime;
 use lilos::mutex::Mutex;
-use core::pin::Pin;
+use lilos::time::TickTime;
+use lilos::{create_mutex, create_static_mutex};
 use thingbuf::mpsc::{channel, RecvRef};
 use thingbuf::mpsc::{Receiver, Sender};
-use core::borrow::Borrow;
 
 pub struct Sink<T: Default + Clone> {
     receiver: Receiver<T>,
@@ -45,25 +45,18 @@ where
 {
     pub fn new() -> Self {
         Source {
-            senders:Vec::<Sender<T>>::new(),
+            senders: Vec::<Sender<T>>::new(),
         }
     }
-    /*async fn emit_async(&mut self, item: T) -> Result<(), SendError<T>> {
-        for sender in self.senders.iter() {
-            sender.send_async(item.clone()).await.unwrap()  ;
-        }
-        Ok(())
-    }*/
     pub fn emit(&self, item: T) {
         interrupt::free(|cs| {
-           // let mut senders = *self.senders.lock();
             for sender in self.senders.iter() {
                 let _ = sender.send(item.clone());
             }
         });
     }
 }
-
+/*
 struct TimerSource {
     source: Source<()>,
     interval: Duration,
@@ -88,11 +81,11 @@ impl TimerSource {
             //           tokio::time::sleep(self.interval).await;
         }
     }
-}
+}*/
 
 pub static mut TIMER_SERVER: Option<TimerServer> = None;
 
-pub fn get_timer_server() -> &'static mut TimerServer {
+pub fn get_timer_server() -> &'static mut TimerServer<'static> {
     unsafe {
         if TIMER_SERVER.is_none() {
             TIMER_SERVER = Some(TimerServer::new());
@@ -124,27 +117,25 @@ struct TimerEntry {
     expires_at: TickTime,
 }
 
-pub struct TimerServer {
-    clients: Pin<&Mutex<Vec<TimerEntry>>>,
+pub struct TimerServer<'a> {
+    clients: Pin<&'a Mutex<Vec<TimerEntry>>>,
 }
 
-impl TimerServer {
+impl<'a> TimerServer<'a> {
     pub fn new() -> Self {
-        create_mutex!( clients, Vec::<TimerEntry>::new());
-        Self {
-            clients
-        }
+        let mutex = create_static_mutex!(Vec::<TimerEntry>, Vec::<TimerEntry>::new());
+        Self { clients: mutex }
     }
 
-    fn add(&mut self,te:TimerEntry ) {
-        interrupt::free(|cs| {
-            self.clients.perform(|x| {
-                x.push(te);
-            });
-        });
+    async fn add(&mut self, te: TimerEntry) {
+        self.clients
+            .perform(|timer_entries: &mut Vec<TimerEntry>| {
+                timer_entries.push(te);
+            })
+            .await
     }
 
-    pub fn new_interval(&mut self, interval: u32, client: Sender<TimerMsg>) {
+    pub async fn new_interval(&mut self, interval: u32, client: Sender<TimerMsg>) {
         let te = TimerEntry {
             kind: TimerType::Interval,
             interval: Duration::from_millis(interval as u64),
@@ -152,10 +143,10 @@ impl TimerServer {
             repeat: true,
             expires_at: TickTime::now() + Duration::from_millis(interval as u64),
         };
-        self.add(te);
+        self.add(te).await;
     }
 
-    pub fn new_gate(&mut self, interval: u32, client: Sender<TimerMsg>) {
+    pub async fn new_gate(&mut self, interval: u32, client: Sender<TimerMsg>) {
         let te = TimerEntry {
             kind: TimerType::Gate,
             interval: Duration::from_millis(interval as u64),
@@ -163,10 +154,10 @@ impl TimerServer {
             repeat: true,
             expires_at: TickTime::now() + Duration::from_millis(interval as u64),
         };
-        self.add(te);
+        self.add(te).await;
     }
 
-    pub fn one_shot(&mut self, interval: u32, client: Sender<TimerMsg>) {
+    pub async fn one_shot(&mut self, interval: u32, client: Sender<TimerMsg>) {
         let te = TimerEntry {
             kind: TimerType::OneShot,
             interval: Duration::from_millis(interval as u64),
@@ -174,21 +165,22 @@ impl TimerServer {
             repeat: false,
             expires_at: TickTime::now() + Duration::from_millis(interval as u64),
         };
-        self.add(te);
+        self.add(te).await;
     }
 
     pub fn cancel_all(&mut self) {
         // self.clients.clear();
     }
 
-
     pub async fn run(&mut self) -> Infallible {
         loop {
-            let deadline = self.find_next_expiration();
+//            hprintln!("TimerServer::run()");
+            let deadline = self.find_next_expiration().await;
             sleep_until(deadline).await;
             let mut now = TickTime::now();
-            interrupt::free(|cs| {
-                self.clients.perform(|timer_entries: &mut Vec<TimerEntry>| {
+            self.clients
+                .perform(|timer_entries: &mut Vec<TimerEntry>| {
+//                    hprintln!("TimerServer::run() timer_entries.len() {}", timer_entries.len());
                     for te in timer_entries.iter_mut() {
                         if te.expires_at <= now {
                             te.client.try_send(TimerMsg {}).expect(" channel overflow ");
@@ -201,9 +193,9 @@ impl TimerServer {
                             }
                         }
                     }
-                });
-            })
-            /* 
+                })
+                .await;
+            /*
             for te in self.clients.iter_mut() {
                 if te.expires_at <= now {
                     let _r = te.client.send(TimerMsg {}).await.unwrap();
@@ -220,13 +212,17 @@ impl TimerServer {
     }
 
     // search all timerentries for the next expiration time
-    pub fn find_next_expiration(&mut self) -> TickTime {
-        let mut exp = TickTime::now() + Duration::from_secs(1); // 1 sec default as max start
-        for te in self.clients.iter_mut() {
-            if te.expires_at < exp {
-                exp = te.expires_at;
-            }
-        }
+    pub async fn find_next_expiration(&mut self) -> TickTime {
+        let mut exp = TickTime::now() + Duration::from_secs(1); // 1 sec default as max start value
+//        hprintln!("TimerServer::find_next_expiration()");
+        self.clients
+                .perform(|timer_entries: &mut Vec<TimerEntry>| {
+                for te in timer_entries.iter_mut() {
+                    if te.expires_at < exp {
+                        exp = te.expires_at;
+                    }
+                }
+            }).await;
         exp
     }
 }

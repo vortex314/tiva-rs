@@ -42,7 +42,7 @@ impl<'a> Led<'a> {
     }
 
     pub async fn run(&mut self) -> Infallible {
-        get_timer_server().new_gate(100,  self.timer_tick.sender());
+        get_timer_server().new_gate(100,  self.timer_tick.sender()).await;
         loop {
             select_biased! {
                 msg = self.active_sink.recv().fuse() => {

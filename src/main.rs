@@ -135,7 +135,7 @@ fn main() -> ! {
     lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
     lilos::exec::run_tasks(
         &mut [timer_server_task, led_task, uart_sender], // <-- array of tasks
-        0b111,                                           // <-- which to start initially
+        lilos::exec::ALL_TASKS,                                           // <-- which to start initially
     );
 }
 
@@ -167,7 +167,7 @@ async fn uart_sender(
     let tick_time = TickTime::now();
     let mut buffer: Box<[u8; 100]> = Box::new([0u8; 100]);
     let mut ts = Box::new(Sink::<TimerMsg>::new(2));
-    get_timer_server().new_interval(100, ts.sender());
+    get_timer_server().new_interval(100, ts.sender()).await;
     hprintln!("uart_sender started");
     loop {
         //     hprintln!("uart_sender loop");

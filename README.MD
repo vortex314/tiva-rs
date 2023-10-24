@@ -80,4 +80,8 @@ Build with
 - (gdb) i r lr - info register lr
 - (gdb) jump reset - jump to reset
 - (gdb) jump main - jump to main
+- (gdb) x/10x $sp - examine stack
+- (gdb) x/10x $pc - examine program counter
+- (gdb) info break - list breakpoints
+- (gdb) delete breakpoints - delete all breakpoints
 
