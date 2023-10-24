@@ -70,9 +70,6 @@ use limero::TIMER_SERVER;
 #[cortex_m_rt::entry]
 fn main() -> ! {
     heap_setup();
-    unsafe {
-        TIMER_SERVER = Some(TimerServer::new());
-    };
 
     let (tx, rx) = conn::mpsc::channel::<String>(10);
     let mut peripherals = hal::Peripherals::take().unwrap();
