@@ -8,6 +8,7 @@
 
 use alloc::boxed::Box;
 use core::convert::Infallible;
+use core::fmt::Write;
 use cortex_m_rt::exception;
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
@@ -194,8 +195,8 @@ async fn uart_sender(
         let length = serializer.end();
         let crc = crc_calc(buffer.as_mut(), length);
         tx.write_all(&buffer.as_slice()[0..length]);
-        tx.write_all(&['\r' as u8, '\n' as u8]);
+        // tx.write_all(&['\r' as u8, '\n' as u8]);
         //     tx.write_all(&buffer.as_mut());
-        //     tx.write_fmt(format_args!("{:04X}\r\n", crc)).unwrap();
+        tx.write_fmt(format_args!("{:04X}\r\n", crc)).unwrap();
     }
 }
