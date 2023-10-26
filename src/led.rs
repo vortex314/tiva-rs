@@ -1,4 +1,5 @@
 use core::convert::Infallible;
+use cortex_m_semihosting::hprintln;
 use embedded_hal::digital::v1::OutputPin;
 use futures::{select_biased, future::select};
 use crate::limero::{Sink, get_timer_server,TimerMsg};
@@ -42,8 +43,10 @@ impl<'a> Led<'a> {
     }
 
     pub async fn run(&mut self) -> Infallible {
+        hprintln!("Led::run()");
         get_timer_server().new_gate(100,  self.timer_tick.sender()).await;
         loop {
+            hprintln!("Led::run() loop");
             select_biased! {
                 msg = self.active_sink.recv().fuse() => {
                     self.set_active(msg);

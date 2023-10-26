@@ -19,7 +19,7 @@ use cortex_m_rt::interrupt;
 
 use hal::serial::{RxPin, TxPin};
 use hal::sysctl::Sysctl;
-use lilos::time::TickTime;
+// use lilos::time::TickTime;
 use tm4c123x as device;
 use tm4c123x::{uart0, UART0};
 use tm4c123x_hal::delay::Delay;

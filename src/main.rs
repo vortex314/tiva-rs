@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(type_alias_impl_trait)]
 //#![feature(noop_waker)]
 #![no_main]
 #![allow(deprecated)]
@@ -7,18 +8,25 @@
 #![allow(unused_mut)]
 
 use alloc::boxed::Box;
-use serde::de;
+use embassy_time::time_driver_impl;
 use core::any::Any;
 use core::convert::Infallible;
 use core::fmt::Write;
+use cortex_m::peripheral::{ SYST }  ;
 use cortex_m_rt::exception;
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
 use futures::select_biased;
+use serde::de;
 // use std::process::Output;
 // use alloc::task;
 
-use lilos::time::TickTime;
+// use lilos::time::TickTime;
+use embassy_executor::Spawner;
+use embassy_sync::mutex::Mutex;
+use embassy_time::Instant;
+use embassy_time::driver::{Driver, AlarmHandle};
+
 
 use tm4c123x_hal::gpio::gpioa::PA0;
 use tm4c123x_hal::gpio::gpioa::PA1;
@@ -34,16 +42,16 @@ use alloc::string::String;
 use core::panic::PanicInfo;
 
 use serde::ser::SerializeSeq;
-use serde::Serializer;
 use serde::Serialize;
+use serde::Serializer;
 use serde_derive::Serialize;
 use serde_json_core::ser::Serializer as Ser;
 
 #[derive(Serialize)]
-    struct Test {
-        x: u32,
-        b: &'static str,
-    }
+struct Test {
+    x: u32,
+    b: &'static str,
+}
 
 extern crate alloc;
 use core::option::Option::Some;
@@ -74,14 +82,50 @@ fn heap_setup() {
     unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
 }
 
+struct MyDriver {
+    msw : u32
+}
+
+impl MyDriver {
+    pub fn new() -> Self {
+        Self {msw:0}
+    }
+}
+
+embassy_time::time_driver_impl!(static DRIVER: MyDriver = MyDriver{msw:0});
+
+#[no_mangle]
+fn _embassy_time_schedule_wake(_at: Instant, _cx: &mut ()) {
+    unimplemented!()
+}
+
+impl Driver for MyDriver {
+    fn now(&self) -> u64 {
+        SYST::get_current() as u64 + ((self.msw as u64) << 32)
+    }
+    unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
+        unimplemented!("allocate_alarm")
+    }
+    fn set_alarm_callback(&self, alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut ()) {
+        unimplemented!("set_alarm_callback")
+    }
+    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
+        unimplemented!("set_alarm")
+    }
+}
+
+
+
+
+
 mod led;
 mod limero;
 mod uart;
-
 use uart::Uart;
 
-#[cortex_m_rt::entry]
-fn main() -> ! {
+// #[cortex_m_rt::entry]
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
     heap_setup();
 
     let (tx, rx) = conn::mpsc::channel::<String>(10);
@@ -116,11 +160,11 @@ fn main() -> ! {
     let (mut tx, mut rx) = uart.split();
     let mut uart_actor = Uart::new(&mut rx, &mut tx);
     let mut serde_actor = SerdeActor::new();
-    &mut serde_actor.txd_source >> & uart_actor.txd_sink;
-    &mut uart_actor.rxd_source >> & serde_actor.rxd_sink;
+    &mut serde_actor.txd_source >> &uart_actor.txd_sink;
+    &mut uart_actor.rxd_source >> &serde_actor.rxd_sink;
     serde_actor.publish("src/tiva/sys/started", &"started");
     serde_actor.publish("src/tiva/sys/heap", &ALLOCATOR.free());
-    serde_actor.publish("src/tiva/sys/heap_size", &[1,2,3,4]);
+    serde_actor.publish("src/tiva/sys/heap_size", &[1, 2, 3, 4]);
 
     let t = Test { x: 1, b: "hi" };
     serde_actor.publish("src/tiva/sys/test", &t);
@@ -154,18 +198,35 @@ fn main() -> ! {
 
     let mut led_actor = led::Led::new(&mut pin_red);
     led_actor.active_sink.on(true);
-    let timer_server_task = core::pin::pin!(get_timer_server().run());
+    hprintln!("main loop started");
+    loop {
+        select_biased! {
+            _ = get_timer_server().run().fuse() => {
+                hprintln!("timer_server_task done");
+            },
+            _ = uart_actor.run().fuse() => {
+                hprintln!("uart_actor done");
+            },
+            _ = serde_actor.run().fuse() => {
+                hprintln!("serde_actor done");
+            },
+            _ = led_actor.run().fuse() => {
+                hprintln!("led_actor done");
+            },
+        };
+    };
+
     //    let uart_sender = core::pin::pin!(uart_sender(uart));
-    lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
-    lilos::exec::run_tasks(
-        &mut [
-            timer_server_task,
-            core::pin::pin!(led_actor.run()),
-            core::pin::pin!(uart_actor.run()),
-            core::pin::pin!(serde_actor.run()),
-        ], // <-- array of tasks
-        lilos::exec::ALL_TASKS, // <-- which to start initially
-    );
+    /* lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
+        lilos::exec::run_tasks(
+            &mut [
+    //            timer_server_task,
+                core::pin::pin!(led_actor.run()),
+    //          core::pin::pin!(uart_actor.run()),
+    //            core::pin::pin!(serde_actor.run()),
+            ], // <-- array of tasks
+            lilos::exec::ALL_TASKS, // <-- which to start initially
+        );*/
 }
 
 fn crc_calc(data: &[u8], length: usize) -> u16 {
@@ -185,25 +246,24 @@ fn crc_calc(data: &[u8], length: usize) -> u16 {
 
 #[allow(dead_code)]
 use alloc::vec::Vec;
-use limero::Source;
-use futures::FutureExt;
 use core::fmt::Debug;
+use futures::FutureExt;
+use limero::Source;
 type Bytes = Vec<u8>;
 
- 
-#[derive(Debug,Default ,Clone  )]
+#[derive(Debug, Default, Clone)]
 enum PubSubMsg {
     #[default]
     None,
     Sub(String),
-    Pub(String,Bytes),
+    Pub(String, Bytes),
 }
 struct SerdeActor {
     pub txd_source: Source<Bytes>,
     pub rxd_sink: Sink<Bytes>,
-    pub pubsub_msg : Sink<PubSubMsg>,
+    pub pubsub_msg: Sink<PubSubMsg>,
     timer_tick: Sink<TimerMsg>,
-    tick_time : TickTime,
+    //    tick_time : TickTime,
     buffer: Box<[u8; 100]>,
 }
 struct BytesWrapper<'a>(&'a Vec<u8>);
@@ -218,7 +278,8 @@ impl Serialize for BytesWrapper<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
-    { //todo could be a base64 encoding
+    {
+        //todo could be a base64 encoding
         let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
         for e in self.0 {
             seq.serialize_element(e)?;
@@ -230,19 +291,22 @@ impl Serialize for BytesWrapper<'_> {
 impl SerdeActor {
     pub fn new() -> Self {
         let timer_tick = Sink::<TimerMsg>::new(3);
-        let tick_time = TickTime::now();
+        //        let tick_time = TickTime::now();
 
         Self {
             txd_source: Source::<Vec<u8>>::new(),
             rxd_sink: Sink::<Vec<u8>>::new(10),
             timer_tick,
-            tick_time,
-            pubsub_msg : Sink::<PubSubMsg>::new(10),
+            //            tick_time,
+            pubsub_msg: Sink::<PubSubMsg>::new(10),
             buffer: Box::new([0u8; 100]),
         }
     }
 
-    pub fn publish<T>(& self,topic: &str, payload: & T) where T: Serialize {
+    pub fn publish<T>(&self, topic: &str, payload: &T)
+    where
+        T: Serialize,
+    {
         let mut buffer = Box::new([0u8; 100]);
         let mut serializer: Ser<'_> = Ser::new(buffer.as_mut());
         let mut seq = serializer.serialize_seq(None).unwrap();
@@ -253,23 +317,28 @@ impl SerdeActor {
         let mut length = serializer.end();
         let crc = crc_calc(buffer.as_mut(), length);
         let crc_str = alloc::format!("{:04X}\r\n", crc);
-        buffer[length..length+6].copy_from_slice(crc_str.as_bytes());
+        buffer[length..length + 6].copy_from_slice(crc_str.as_bytes());
         length += 6;
-        self.txd_source.emit((buffer.as_slice()[0..length]).to_vec());
+        self.txd_source
+            .emit((buffer.as_slice()[0..length]).to_vec());
     }
 
     pub async fn run(&mut self) -> Infallible {
-        get_timer_server().new_gate(100, self.timer_tick.sender()).await;
+        get_timer_server()
+            .new_gate(100, self.timer_tick.sender())
+            .await;
         loop {
             select_biased! {
                 _ = self.timer_tick.recv().fuse() => {
-                    self.keep_alive();
+                    hprintln!("pubsub timer tick");
+                    // self.keep_alive();
                 },
                 msg = self.rxd_sink.recv().fuse() => {
-                    hprintln!("pubsub msg {:?}", msg);
+                    hprintln!("pubsub rxd_sink.recv()");
                 },
                 msg = self.pubsub_msg.recv().fuse() => {
-                     match  msg  {
+                    hprintln!("pubsub pubsub_msg.recv()");
+                    /*  match  msg  {
                         PubSubMsg::Pub(topic,x) => {
                             let mut serializer: Ser<'_> = Ser::new(self.buffer.as_mut());
                             let mut seq = serializer.serialize_seq(None).unwrap();
@@ -284,11 +353,11 @@ impl SerdeActor {
                             length += 6;
                             self.txd_source.emit((self.buffer.as_slice()[0..length]).to_vec());
 
-                        } 
+                        }
                         _ => {}
-                    };
+                    };*/
                 },
-                
+
             }
         }
     }
@@ -298,7 +367,7 @@ impl SerdeActor {
         let mut seq = serializer.serialize_seq(None).unwrap();
         seq.serialize_element("pub").unwrap();
         seq.serialize_element("src/tiva/sys/loopback").unwrap();
-        let u = self.tick_time.elapsed().0;
+        let u = 123456; // self.tick_time.elapsed().0;
         let msec = u % 1000;
         let sec = (u / 1000) % 60;
         let min = (u / 60000) % 60;
@@ -314,7 +383,8 @@ impl SerdeActor {
         seq.end().unwrap();
         let length = serializer.end();
         let crc = crc_calc(buffer.as_mut(), length);
-        self.txd_source.emit((buffer.as_slice()[0..length]).to_vec());
+        self.txd_source
+            .emit((buffer.as_slice()[0..length]).to_vec());
         let crc_str = alloc::format!("{:04X}\r\n", crc);
         self.txd_source.emit(crc_str.as_bytes().to_vec());
     }
@@ -330,7 +400,7 @@ async fn uart_sender(
     >,
 ) -> Infallible {
     let (mut tx, _rx) = uart0.split();
-    let tick_time = TickTime::now();
+    // let tick_time = TickTime::now();
     let mut buffer: Box<[u8; 100]> = Box::new([0u8; 100]);
     let mut ts = Box::new(Sink::<TimerMsg>::new(2));
     get_timer_server().new_interval(100, ts.sender()).await;
@@ -342,7 +412,7 @@ async fn uart_sender(
         let mut seq = serializer.serialize_seq(None).unwrap();
         seq.serialize_element("pub").unwrap();
         seq.serialize_element("src/tiva/sys/loopback").unwrap();
-        let u = tick_time.elapsed().0;
+        let u = 12345; // tick_time.elapsed().0;
         let msec = u % 1000;
         let sec = (u / 1000) % 60;
         let min = (u / 60000) % 60;
