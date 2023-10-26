@@ -35,7 +35,15 @@ use core::panic::PanicInfo;
 
 use serde::ser::SerializeSeq;
 use serde::Serializer;
+use serde::Serialize;
+use serde_derive::Serialize;
 use serde_json_core::ser::Serializer as Ser;
+
+#[derive(Serialize)]
+    struct Test {
+        x: u32,
+        b: &'static str,
+    }
 
 extern crate alloc;
 use core::option::Option::Some;
@@ -107,9 +115,15 @@ fn main() -> ! {
     );
     let (mut tx, mut rx) = uart.split();
     let mut uart_actor = Uart::new(&mut rx, &mut tx);
-    let mut serializer = SerdeActor::new();
-    &mut serializer.txd_source >> & uart_actor.txd_sink;
-    &mut uart_actor.rxd_source >> & serializer.rxd_sink;
+    let mut serde_actor = SerdeActor::new();
+    &mut serde_actor.txd_source >> & uart_actor.txd_sink;
+    &mut uart_actor.rxd_source >> & serde_actor.rxd_sink;
+    serde_actor.publish("src/tiva/sys/started", &"started");
+    serde_actor.publish("src/tiva/sys/heap", &ALLOCATOR.free());
+    serde_actor.publish("src/tiva/sys/heap_size", &[1,2,3,4]);
+
+    let t = Test { x: 1, b: "hi" };
+    serde_actor.publish("src/tiva/sys/test", &t);
 
     let mut portf = peripherals.GPIO_PORTF.split(&sysctl.power_control);
     let porte = peripherals.GPIO_PORTE.split(&sysctl.power_control);
@@ -148,7 +162,7 @@ fn main() -> ! {
             timer_server_task,
             core::pin::pin!(led_actor.run()),
             core::pin::pin!(uart_actor.run()),
-            core::pin::pin!(serializer.run()),
+            core::pin::pin!(serde_actor.run()),
         ], // <-- array of tasks
         lilos::exec::ALL_TASKS, // <-- which to start initially
     );
@@ -175,13 +189,14 @@ use limero::Source;
 use futures::FutureExt;
 use core::fmt::Debug;
 type Bytes = Vec<u8>;
-use serde::Serialize;
+
+ 
 #[derive(Debug,Default ,Clone  )]
 enum PubSubMsg {
     #[default]
     None,
     Sub(String),
-    Pub(String,Bytes)   ,
+    Pub(String,Bytes),
 }
 struct SerdeActor {
     pub txd_source: Source<Bytes>,
@@ -190,6 +205,26 @@ struct SerdeActor {
     timer_tick: Sink<TimerMsg>,
     tick_time : TickTime,
     buffer: Box<[u8; 100]>,
+}
+struct BytesWrapper<'a>(&'a Vec<u8>);
+
+impl BytesWrapper<'_> {
+    pub fn new<'a>(bytes: &'a Vec<u8>) -> BytesWrapper<'a> {
+        BytesWrapper(bytes)
+    }
+}
+
+impl Serialize for BytesWrapper<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    { //todo could be a base64 encoding
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for e in self.0 {
+            seq.serialize_element(e)?;
+        }
+        seq.end()
+    }
 }
 
 impl SerdeActor {
@@ -207,19 +242,20 @@ impl SerdeActor {
         }
     }
 
-    pub fn publish(& self,topic: &str, payload: & dyn Serialize<serde_json_core::ser::Serializer>) {
-        let mut serializer: Ser<'_> = Ser::new(self.buffer.as_mut());
+    pub fn publish<T>(& self,topic: &str, payload: & T) where T: Serialize {
+        let mut buffer = Box::new([0u8; 100]);
+        let mut serializer: Ser<'_> = Ser::new(buffer.as_mut());
         let mut seq = serializer.serialize_seq(None).unwrap();
-        serializer.serialize_element("pub").unwrap();
-        serializer.serialize_element(topic).unwrap();
-        serializer.serialize_element(payload).unwrap();
+        seq.serialize_element("pub").unwrap();
+        seq.serialize_element(topic).unwrap();
+        seq.serialize_element(payload).unwrap();
         seq.end().unwrap();
-        let length = serializer.end();
-        let crc = crc_calc(self.buffer.as_mut(), length);
+        let mut length = serializer.end();
+        let crc = crc_calc(buffer.as_mut(), length);
         let crc_str = alloc::format!("{:04X}\r\n", crc);
-        self.buffer[length..length+6].copy_from_slice(crc_str.as_bytes());
+        buffer[length..length+6].copy_from_slice(crc_str.as_bytes());
         length += 6;
-        self.txd_source.emit((self.buffer.as_slice()[0..length]).to_vec());
+        self.txd_source.emit((buffer.as_slice()[0..length]).to_vec());
     }
 
     pub async fn run(&mut self) -> Infallible {
@@ -237,11 +273,11 @@ impl SerdeActor {
                         PubSubMsg::Pub(topic,x) => {
                             let mut serializer: Ser<'_> = Ser::new(self.buffer.as_mut());
                             let mut seq = serializer.serialize_seq(None).unwrap();
-                            serializer.serialize_element("pub").unwrap();
-                            serializer.serialize_element(topic.as_str()).unwrap();
-                            serializer.serialize_element(x).unwrap();
+                            seq.serialize_element("pub").unwrap();
+                            seq.serialize_element(topic.as_str()).unwrap();
+                            seq.serialize_element(& BytesWrapper::new(&x)).unwrap();
                             seq.end().unwrap();
-                            let length = serializer.end();
+                            let mut length = serializer.end();
                             let crc = crc_calc(self.buffer.as_mut(), length);
                             let crc_str = alloc::format!("{:04X}\r\n", crc);
                             self.buffer[length..length+6].copy_from_slice(crc_str.as_bytes());
