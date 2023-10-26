@@ -83,34 +83,36 @@ fn heap_setup() {
 }
 
 struct MyDriver {
-    msw : u32
+    msw : u32,
+    ah : Option<AlarmHandle>,
 }
 
 impl MyDriver {
     pub fn new() -> Self {
-        Self {msw:0}
+        Self {msw:0,ah:unsafe { Some(AlarmHandle::new(0))} }
     }
 }
 
-embassy_time::time_driver_impl!(static DRIVER: MyDriver = MyDriver{msw:0});
-
+embassy_time::time_driver_impl!(static DRIVER: MyDriver = MyDriver{msw:0,ah:None});
+// embassy_time::timer_queue_impl!(DRIVER = MyDriver{msw:0});
+/* 
 #[no_mangle]
 fn _embassy_time_schedule_wake(_at: Instant, _cx: &mut ()) {
     unimplemented!()
-}
+}*/
 
 impl Driver for MyDriver {
     fn now(&self) -> u64 {
         SYST::get_current() as u64 + ((self.msw as u64) << 32)
     }
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
-        unimplemented!("allocate_alarm")
+        Some(AlarmHandle::new(0))
     }
     fn set_alarm_callback(&self, alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut ()) {
-        unimplemented!("set_alarm_callback")
+        hprintln!("set_alarm_callback")
     }
     fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
-        unimplemented!("set_alarm")
+        true
     }
 }
 
