@@ -7,11 +7,14 @@
 #![allow(unused_mut)]
 
 use alloc::boxed::Box;
+use serde::de;
+use core::any::Any;
 use core::convert::Infallible;
 use core::fmt::Write;
 use cortex_m_rt::exception;
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
+use futures::select_biased;
 // use std::process::Output;
 // use alloc::task;
 
@@ -44,6 +47,7 @@ use thingbuf as conn;
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    hprintln!("panic {:?}", _info);
     loop {}
 }
 
@@ -63,10 +67,10 @@ fn heap_setup() {
 }
 
 mod led;
-// mod uart;
 mod limero;
-use limero::TimerServer;
-use limero::TIMER_SERVER;
+mod uart;
+
+use uart::Uart;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -101,6 +105,11 @@ fn main() -> ! {
         &clocks,
         &sysctl.power_control,
     );
+    let (mut tx, mut rx) = uart.split();
+    let mut uart_actor = Uart::new(&mut rx, &mut tx);
+    let mut serializer = SerdeActor::new();
+    &mut serializer.txd_source >> & uart_actor.txd_sink;
+    &mut uart_actor.rxd_source >> & serializer.rxd_sink;
 
     let mut portf = peripherals.GPIO_PORTF.split(&sysctl.power_control);
     let porte = peripherals.GPIO_PORTE.split(&sysctl.power_control);
@@ -129,15 +138,19 @@ fn main() -> ! {
         }
     });
 
-    let mut led = led::Led::new(&mut pin_red);
-    led.active_sink.on(true);
-    let led_task = core::pin::pin!(led.run());
+    let mut led_actor = led::Led::new(&mut pin_red);
+    led_actor.active_sink.on(true);
     let timer_server_task = core::pin::pin!(get_timer_server().run());
-    let uart_sender = core::pin::pin!(uart_sender(uart));
+    //    let uart_sender = core::pin::pin!(uart_sender(uart));
     lilos::time::initialize_sys_tick(&mut cortex_peripherals.SYST, 80_000_000);
     lilos::exec::run_tasks(
-        &mut [timer_server_task, led_task, uart_sender], // <-- array of tasks
-        lilos::exec::ALL_TASKS,                                           // <-- which to start initially
+        &mut [
+            timer_server_task,
+            core::pin::pin!(led_actor.run()),
+            core::pin::pin!(uart_actor.run()),
+            core::pin::pin!(serializer.run()),
+        ], // <-- array of tasks
+        lilos::exec::ALL_TASKS, // <-- which to start initially
     );
 }
 
@@ -154,6 +167,121 @@ fn crc_calc(data: &[u8], length: usize) -> u16 {
         }
     }
     crc
+}
+
+#[allow(dead_code)]
+use alloc::vec::Vec;
+use limero::Source;
+use futures::FutureExt;
+use core::fmt::Debug;
+type Bytes = Vec<u8>;
+use serde::Serialize;
+#[derive(Debug,Default ,Clone  )]
+enum PubSubMsg {
+    #[default]
+    None,
+    Sub(String),
+    Pub(String,Bytes)   ,
+}
+struct SerdeActor {
+    pub txd_source: Source<Bytes>,
+    pub rxd_sink: Sink<Bytes>,
+    pub pubsub_msg : Sink<PubSubMsg>,
+    timer_tick: Sink<TimerMsg>,
+    tick_time : TickTime,
+    buffer: Box<[u8; 100]>,
+}
+
+impl SerdeActor {
+    pub fn new() -> Self {
+        let timer_tick = Sink::<TimerMsg>::new(3);
+        let tick_time = TickTime::now();
+
+        Self {
+            txd_source: Source::<Vec<u8>>::new(),
+            rxd_sink: Sink::<Vec<u8>>::new(10),
+            timer_tick,
+            tick_time,
+            pubsub_msg : Sink::<PubSubMsg>::new(10),
+            buffer: Box::new([0u8; 100]),
+        }
+    }
+
+    pub fn publish(& self,topic: &str, payload: & dyn Serialize<serde_json_core::ser::Serializer>) {
+        let mut serializer: Ser<'_> = Ser::new(self.buffer.as_mut());
+        let mut seq = serializer.serialize_seq(None).unwrap();
+        serializer.serialize_element("pub").unwrap();
+        serializer.serialize_element(topic).unwrap();
+        serializer.serialize_element(payload).unwrap();
+        seq.end().unwrap();
+        let length = serializer.end();
+        let crc = crc_calc(self.buffer.as_mut(), length);
+        let crc_str = alloc::format!("{:04X}\r\n", crc);
+        self.buffer[length..length+6].copy_from_slice(crc_str.as_bytes());
+        length += 6;
+        self.txd_source.emit((self.buffer.as_slice()[0..length]).to_vec());
+    }
+
+    pub async fn run(&mut self) -> Infallible {
+        get_timer_server().new_gate(100, self.timer_tick.sender()).await;
+        loop {
+            select_biased! {
+                _ = self.timer_tick.recv().fuse() => {
+                    self.keep_alive();
+                },
+                msg = self.rxd_sink.recv().fuse() => {
+                    hprintln!("pubsub msg {:?}", msg);
+                },
+                msg = self.pubsub_msg.recv().fuse() => {
+                     match  msg  {
+                        PubSubMsg::Pub(topic,x) => {
+                            let mut serializer: Ser<'_> = Ser::new(self.buffer.as_mut());
+                            let mut seq = serializer.serialize_seq(None).unwrap();
+                            serializer.serialize_element("pub").unwrap();
+                            serializer.serialize_element(topic.as_str()).unwrap();
+                            serializer.serialize_element(x).unwrap();
+                            seq.end().unwrap();
+                            let length = serializer.end();
+                            let crc = crc_calc(self.buffer.as_mut(), length);
+                            let crc_str = alloc::format!("{:04X}\r\n", crc);
+                            self.buffer[length..length+6].copy_from_slice(crc_str.as_bytes());
+                            length += 6;
+                            self.txd_source.emit((self.buffer.as_slice()[0..length]).to_vec());
+
+                        } 
+                        _ => {}
+                    };
+                },
+                
+            }
+        }
+    }
+    fn keep_alive(&self) {
+        let mut buffer: Box<[u8; 100]> = Box::new([0u8; 100]);
+        let mut serializer = Ser::new(buffer.as_mut());
+        let mut seq = serializer.serialize_seq(None).unwrap();
+        seq.serialize_element("pub").unwrap();
+        seq.serialize_element("src/tiva/sys/loopback").unwrap();
+        let u = self.tick_time.elapsed().0;
+        let msec = u % 1000;
+        let sec = (u / 1000) % 60;
+        let min = (u / 60000) % 60;
+        let hour = (u / 3600000) % 24;
+        let day = (u / 86400000) % 365;
+        seq.serialize_element(&day).unwrap();
+        seq.serialize_element(&hour).unwrap();
+        seq.serialize_element(&min).unwrap();
+        seq.serialize_element(&sec).unwrap();
+        seq.serialize_element(&msec).unwrap();
+        let size = ALLOCATOR.free();
+        seq.serialize_element(&size).unwrap();
+        seq.end().unwrap();
+        let length = serializer.end();
+        let crc = crc_calc(buffer.as_mut(), length);
+        self.txd_source.emit((buffer.as_slice()[0..length]).to_vec());
+        let crc_str = alloc::format!("{:04X}\r\n", crc);
+        self.txd_source.emit(crc_str.as_bytes().to_vec());
+    }
 }
 
 async fn uart_sender(
@@ -174,7 +302,7 @@ async fn uart_sender(
     loop {
         //     hprintln!("uart_sender loop");
         let _ = ts.recv().await;
-        let mut serializer = Ser::new(buffer.as_mut());
+        let mut serializer: Ser<'_> = Ser::new(buffer.as_mut());
         let mut seq = serializer.serialize_seq(None).unwrap();
         seq.serialize_element("pub").unwrap();
         seq.serialize_element("src/tiva/sys/loopback").unwrap();

@@ -13,6 +13,15 @@ use lilos::time::TickTime;
 use lilos::{create_mutex, create_static_mutex};
 use thingbuf::mpsc::{channel, RecvRef};
 use thingbuf::mpsc::{Receiver, Sender};
+use alloc::string::String;
+
+struct PublishMsg {
+    topic: String,
+    payload: Vec<u8>,
+}
+struct SubscribeMsg {
+    topic: String,
+}
 
 pub struct Sink<T: Default + Clone> {
     receiver: Receiver<T>,
@@ -57,6 +66,18 @@ where
                 let _ = sender.send(item.clone());
             }
         });
+    }
+}
+
+use core::ops::Shr;
+ impl<'a, T: 'static+Default> Shr<&Sink<T>> for &mut Source<T>
+where
+    T: Clone + Send + 'static,
+{
+    type Output = ();
+
+  fn shr(self, rhs: &Sink<T>) -> Self::Output {
+        self.senders.push(rhs.sender());
     }
 }
 /*

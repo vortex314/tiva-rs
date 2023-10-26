@@ -11,6 +11,7 @@ version = "0.1.0"
 alloc_error_handler = []
 
 [dependencies]
+void ={version="1.0.2", default_features = false}
 # HAL PAC 
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"]}
 cortex-m-rt = { version = "0.7.3",features = ["device"] }
