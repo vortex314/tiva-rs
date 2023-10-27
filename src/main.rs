@@ -12,6 +12,7 @@ use embassy_time::time_driver_impl;
 use core::any::Any;
 use core::convert::Infallible;
 use core::fmt::Write;
+use core::task::Poll;
 use cortex_m::peripheral::{ SYST }  ;
 use cortex_m_rt::exception;
 use cortex_m_rt::ExceptionFrame;
@@ -87,7 +88,7 @@ mod limero;
 mod uart;
 use uart::Uart;
 mod timer_driver;
-use crate::timer_driver::SystickClock;
+use crate::timer_driver::PollingSysTick;
 // #[cortex_m_rt::entry]
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -103,11 +104,7 @@ async fn main(spawner: Spawner) {
     );
     let clocks = sysctl.clock_setup.freeze();
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
-    let systick = SystickClock::<80_000_000>::new(cortex_peripherals.SYST, 80_000_000);
-    hprintln!("systick {:?}", systick.now());
-
-    //   let mut tmc = device::CorePeripherals::take().unwrap();
-    // systick_setup(&cp);
+    PollingSysTick::init(cortex_peripherals.SYST, 80_000_000,1000);
 
     let tx_pin = porta_parts
         .pa1

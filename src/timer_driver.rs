@@ -2,6 +2,8 @@ use core::cell::Cell;
 use core::convert::TryInto;
 use core::sync::atomic::{compiler_fence, AtomicU32, AtomicU8, Ordering};
 use core::{mem, ptr};
+use core::cell::UnsafeCell;
+use core::num::Wrapping;
 
 use cortex_m::interrupt;
 use cortex_m::peripheral::syst;
@@ -9,38 +11,53 @@ use cortex_m::peripheral::{syst::SystClkSource, SYST};
 
 use cortex_m_rt::exception;
 
+use cortex_m_semihosting::hprintln;
 use critical_section::CriticalSection;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::driver::{AlarmHandle, Driver};
+use embassy_time::Instant;
 use embassy_time::TICK_HZ;
-use embassy_time::{Instant};
 
-
-/// Systick implementing `rtic_monotonic::Monotonic` which runs at a
-/// settable rate using the `TIMER_HZ` parameter.
-pub struct SystickClock<const TIMER_HZ: u32> {
-    systick: SYST,
-    cnt: u64,
+pub struct PollingSysTick {
+    syst: UnsafeCell<SYST>,
+    counter: UnsafeCell<u32>,
 }
+static mut POLLING_SYSTICK: PollingSysTick = PollingSysTick { syst: UnsafeCell,counter: UnsafeCell };
+
 
 #[exception]
 fn SysTick() {
+    unsafe {
+        POLLING_SYSTICK.on_interrupt();
+    }
     DRIVER.on_interrupt();
 }
 
-impl<const TIMER_HZ: u32> SystickClock<TIMER_HZ> {
-    /// Provide a new `Monotonic` based on SysTick.
-    ///
-    /// The `sysclk` parameter is the speed at which SysTick runs at. This value should come from
-    /// the clock generation function of the used HAL.
-    ///
-    /// Notice that the actual rate of the timer is a best approximation based on the given
-    /// `sysclk` and `TIMER_HZ`.
-    pub fn new(mut systick: SYST, sysclk: u32) -> Self {
+
+impl PollingSysTick {
+    /// Configures SysTick based on the values provided in the calibration.
+    pub fn new(mut syst: SYST, calibration: u32) -> Self {
+        syst.disable_interrupt();
+        syst.set_clock_source(SystClkSource::Core);
+        syst.set_reload(calibration - 1);
+        syst.enable_counter();
+
+        PollingSysTick {
+            syst: UnsafeCell::new(syst),
+            counter: UnsafeCell::default(),
+        }
+    }
+
+    /// Turns this value back into the underlying SysTick.
+    pub fn free(self) -> SYST {
+        self.syst.into_inner()
+    }
+
+    pub fn init(mut systick: SYST, sysclk: u32,tick_rate:u32)  {
         // + TIMER_HZ / 2 provides round to nearest instead of round to 0.
         // - 1 as the counter range is inclusive [0, reload]
-        let reload = (sysclk + TIMER_HZ / 2) / TIMER_HZ - 1;
+        let reload = (sysclk + tick_rate / 2) / tick_rate - 1;
 
         assert!(reload <= 0x00ff_ffff);
         assert!(reload > 0);
@@ -49,21 +66,22 @@ impl<const TIMER_HZ: u32> SystickClock<TIMER_HZ> {
         systick.set_clock_source(SystClkSource::Core);
         systick.set_reload(reload);
         systick.enable_interrupt();
+        systick.enable_counter();
 
-        SystickClock { systick, cnt: 0 }
+        unsafe { POLLING_SYSTICK.syst = UnsafeCell::new(systick);};
     }
 
-    fn now(&mut self) -> Instant {
-        if self.systick.has_wrapped() {
-            self.cnt = self.cnt.wrapping_add(1);
+    pub fn now(& self) -> Instant {
+        if self.syst.into_inner().has_wrapped() {
+            self.counter.get_mut().0 += 1;
         }
-
-        Instant::from_ticks(self.cnt)
+        let ts = (unsafe { (*SYST::PTR).cvr.read() } / 80_000) as u64;
+        Instant::from_ticks(self.counter.into_inner() as u64 * TICK_HZ + ts)
     }
 
     unsafe fn reset(&mut self) {
-        self.systick.clear_current();
-        self.systick.enable_counter();
+        *(self.syst.get()).clear_current();
+        self.systick.unwrap().enable_counter();
     }
 
     #[inline(always)]
@@ -83,32 +101,14 @@ impl<const TIMER_HZ: u32> SystickClock<TIMER_HZ> {
 
     #[inline(always)]
     fn on_interrupt(&mut self) {
-        if self.systick.has_wrapped() {
-            self.cnt = self.cnt.wrapping_add(1);
+        if self.systick.unwrap().has_wrapped() {
+            self.clock = self.clock.wrapping_add(1);
         }
     }
 }
 
 const ALARM_COUNT: usize = 3;
 
-
-// Clock timekeeping works with something we call "periods", which are time intervals
-// of 2^15 ticks. The Clock counter value is 16 bits, so one "overflow cycle" is 2 periods.
-//
-// A `period` count is maintained in parallel to the Timer hardware `counter`, like this:
-// - `period` and `counter` start at 0
-// - `period` is incremented on overflow (at counter value 0)
-// - `period` is incremented "midway" between overflows (at counter value 0x8000)
-//
-// Therefore, when `period` is even, counter is in 0..0x7FFF. When odd, counter is in 0x8000..0xFFFF
-// This allows for now() to return the correct value even if it races an overflow.
-//
-// To get `now()`, `period` is read first, then `counter` is read. If the counter value matches
-// the expected range for the `period` parity, we're done. If it doesn't, this means that
-// a new period start has raced us between reading `period` and `counter`, so we assume the `counter` value
-// corresponds to the next period.
-//
-// `period` is a 32bit integer, so It overflows on 2^32 * 2^15 / 32768 seconds of uptime, which is 136 years.
 fn calc_now(period: u32, counter: u16) -> u64 {
     ((period as u64) << 15) + ((counter as u32 ^ ((period & 1) << 15)) as u64)
 }
@@ -133,7 +133,6 @@ impl AlarmState {
         }
     }
 }
-
 pub(crate) struct SystickDriver {
     /// Number of 2^15 periods elapsed since boot.
     period: AtomicU32,
@@ -151,28 +150,36 @@ embassy_time::time_driver_impl!(static DRIVER: SystickDriver = SystickDriver {
 });
 
 impl SystickDriver {
-    fn init(&'static self, cs: critical_section::CriticalSection) {
-    }
+    fn init(&'static self, cs: critical_section::CriticalSection) {}
 
     fn on_interrupt(&self) {
+        hprintln!("SystickDriver::on_interrupt()");
         critical_section::with(|cs| {
+            for n in 0..ALARM_COUNT {
+                let alarm = &self.alarms.borrow(cs)[n];
+                let at = alarm.timestamp.get();
+                if at != u64::MAX {
+                    let t = self.now();
+                    if t >= at {
+                        self.trigger_alarm(n, cs);
+                    }
+                }
+            }
         })
     }
 
     fn next_period(&self) {
-
         // We only modify the period from the timer interrupt, so we know this can't race.
         let period = self.period.load(Ordering::Relaxed) + 1;
         self.period.store(period, Ordering::Relaxed);
         let t = (period as u64) << 15;
 
         critical_section::with(move |cs| {
-
-                for n in 0..ALARM_COUNT {
-                    let alarm = &self.alarms.borrow(cs)[n];
-                    let at = alarm.timestamp.get();
-                }
-            })
+            for n in 0..ALARM_COUNT {
+                let alarm = &self.alarms.borrow(cs)[n];
+                let at = alarm.timestamp.get();
+            }
+        })
     }
 
     fn get_alarm<'a>(&'a self, cs: CriticalSection<'a>, alarm: AlarmHandle) -> &'a AlarmState {
@@ -197,9 +204,10 @@ impl SystickDriver {
 
 impl Driver for SystickDriver {
     fn now(&self) -> u64 {
-        let period = self.period.load(Ordering::Relaxed);
+        /*let period = self.period.load(Ordering::Relaxed);
         compiler_fence(Ordering::Acquire);
-        calc_now(period, 1)
+        calc_now(period, 1)*/
+        CLOCK_COUNTER.now().as_ticks()
     }
 
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
