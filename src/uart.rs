@@ -7,7 +7,7 @@ use embedded_hal::serial;
 use embedded_hal::serial::Read as Rx;
 
 
-const FRAME_DELIMITER: u8 = 0x7e;
+const FRAME_DELIMITER: u8 = '\n' as u8;
 
 use alloc::vec::Vec;
 use void::Void;

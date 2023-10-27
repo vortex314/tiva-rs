@@ -3,7 +3,7 @@
 //#![feature(noop_waker)]
 #![no_main]
 #![allow(deprecated)]
-//#![allow(unused_imports)]
+#![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(unused_mut)]
 
@@ -82,49 +82,12 @@ fn heap_setup() {
     unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
 }
 
-struct MyDriver {
-    msw : u32,
-    ah : Option<AlarmHandle>,
-}
-
-impl MyDriver {
-    pub fn new() -> Self {
-        Self {msw:0,ah:unsafe { Some(AlarmHandle::new(0))} }
-    }
-}
-
-embassy_time::time_driver_impl!(static DRIVER: MyDriver = MyDriver{msw:0,ah:None});
-// embassy_time::timer_queue_impl!(DRIVER = MyDriver{msw:0});
-/* 
-#[no_mangle]
-fn _embassy_time_schedule_wake(_at: Instant, _cx: &mut ()) {
-    unimplemented!()
-}*/
-
-impl Driver for MyDriver {
-    fn now(&self) -> u64 {
-        SYST::get_current() as u64 + ((self.msw as u64) << 32)
-    }
-    unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
-        Some(AlarmHandle::new(0))
-    }
-    fn set_alarm_callback(&self, alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut ()) {
-        hprintln!("set_alarm_callback")
-    }
-    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
-        true
-    }
-}
-
-
-
-
-
 mod led;
 mod limero;
 mod uart;
 use uart::Uart;
-
+mod timer_driver;
+use crate::timer_driver::SystickClock;
 // #[cortex_m_rt::entry]
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -140,6 +103,9 @@ async fn main(spawner: Spawner) {
     );
     let clocks = sysctl.clock_setup.freeze();
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
+    let systick = SystickClock::<80_000_000>::new(cortex_peripherals.SYST, 80_000_000);
+    hprintln!("systick {:?}", systick.now());
+
     //   let mut tmc = device::CorePeripherals::take().unwrap();
     // systick_setup(&cp);
 
