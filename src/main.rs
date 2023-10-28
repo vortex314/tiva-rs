@@ -88,7 +88,10 @@ mod limero;
 mod uart;
 use uart::Uart;
 mod timer_driver;
-use crate::timer_driver::PollingSysTick;
+use timer_driver::Clock;
+
+
+
 // #[cortex_m_rt::entry]
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -104,7 +107,7 @@ async fn main(spawner: Spawner) {
     );
     let clocks = sysctl.clock_setup.freeze();
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
-    PollingSysTick::init(cortex_peripherals.SYST, 80_000_000,1000);
+    Clock::init_timer_driver(cortex_peripherals.SYST);
 
     let tx_pin = porta_parts
         .pa1
@@ -166,7 +169,7 @@ async fn main(spawner: Spawner) {
     hprintln!("main loop started");
     loop {
         select_biased! {
-            _ = get_timer_server().run().fuse() => {
+            /*_ = get_timer_server().run().fuse() => {
                 hprintln!("timer_server_task done");
             },
             _ = uart_actor.run().fuse() => {
@@ -174,8 +177,8 @@ async fn main(spawner: Spawner) {
             },
             _ = serde_actor.run().fuse() => {
                 hprintln!("serde_actor done");
-            },
-            _ = led_actor.run().fuse() => {
+            },*/
+            _ = led_actor.blink().fuse() => {
                 hprintln!("led_actor done");
             },
         };

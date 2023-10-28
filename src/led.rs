@@ -5,6 +5,8 @@ use futures::{select_biased, future::select};
 use crate::limero::{Sink, get_timer_server,TimerMsg};
 use futures::FutureExt;
 
+use embassy_time::Timer;
+use embassy_time::Duration;
 
 pub struct Led<'a> {
     pin: &'a mut dyn OutputPin,
@@ -24,6 +26,14 @@ impl<'a> Led<'a> {
             active_sink: Sink::<bool>::new(10),
         }
     }
+
+    pub async fn blink(&mut self) {
+        loop {
+            self.toggle();
+            Timer::after(Duration::from_millis(100)).await;
+        }
+    }
+
     fn toggle(&mut self ){
         if self.active {
             if self.led_state {

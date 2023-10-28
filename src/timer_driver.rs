@@ -1,13 +1,14 @@
 use core::cell::Cell;
+use core::cell::UnsafeCell;
 use core::convert::TryInto;
+use core::num::Wrapping;
 use core::sync::atomic::{compiler_fence, AtomicU32, AtomicU8, Ordering};
 use core::{mem, ptr};
-use core::cell::UnsafeCell;
-use core::num::Wrapping;
 
 use cortex_m::interrupt;
 use cortex_m::peripheral::syst;
 use cortex_m::peripheral::{syst::SystClkSource, SYST};
+use cortex_m::singleton;
 
 use cortex_m_rt::exception;
 
@@ -19,99 +20,50 @@ use embassy_time::driver::{AlarmHandle, Driver};
 use embassy_time::Instant;
 use embassy_time::TICK_HZ;
 
-pub struct PollingSysTick {
-    syst: UnsafeCell<SYST>,
-    counter: UnsafeCell<u32>,
+pub struct Clock {
+    msec: u64,
 }
-static mut POLLING_SYSTICK: PollingSysTick = PollingSysTick { syst: UnsafeCell,counter: UnsafeCell };
 
+static mut CLOCK: Clock = Clock { msec: 0 };
+static mut SYSTICK: Option<SYST> = Option::None;
+
+impl Clock {
+    fn now(&self) -> u64 {
+        self.msec * 1000 + Self::get_current_usec() as u64
+    }
+
+    pub fn get_current_usec() -> u32 {
+        if let Some(systick) = unsafe { SYSTICK.as_mut() } {
+            let reg = unsafe { (*SYST::PTR).cvr.read() };
+            (80_0000 - reg) / 80
+        } else {
+            0
+        }
+    }
+
+    pub fn init_timer_driver(syst: SYST) {
+        unsafe {
+            SYSTICK = Some(syst);
+        };
+        if let Some(systick) = unsafe { SYSTICK.as_mut() } {
+            systick.disable_interrupt();
+            systick.set_clock_source(SystClkSource::Core);
+            systick.set_reload(80_0000 - 1);
+            systick.enable_counter();
+            systick.enable_interrupt();
+        };
+    }
+}
 
 #[exception]
 fn SysTick() {
     unsafe {
-        POLLING_SYSTICK.on_interrupt();
+        CLOCK.msec += 1;
     }
     DRIVER.on_interrupt();
 }
 
-
-impl PollingSysTick {
-    /// Configures SysTick based on the values provided in the calibration.
-    pub fn new(mut syst: SYST, calibration: u32) -> Self {
-        syst.disable_interrupt();
-        syst.set_clock_source(SystClkSource::Core);
-        syst.set_reload(calibration - 1);
-        syst.enable_counter();
-
-        PollingSysTick {
-            syst: UnsafeCell::new(syst),
-            counter: UnsafeCell::default(),
-        }
-    }
-
-    /// Turns this value back into the underlying SysTick.
-    pub fn free(self) -> SYST {
-        self.syst.into_inner()
-    }
-
-    pub fn init(mut systick: SYST, sysclk: u32,tick_rate:u32)  {
-        // + TIMER_HZ / 2 provides round to nearest instead of round to 0.
-        // - 1 as the counter range is inclusive [0, reload]
-        let reload = (sysclk + tick_rate / 2) / tick_rate - 1;
-
-        assert!(reload <= 0x00ff_ffff);
-        assert!(reload > 0);
-
-        systick.disable_counter();
-        systick.set_clock_source(SystClkSource::Core);
-        systick.set_reload(reload);
-        systick.enable_interrupt();
-        systick.enable_counter();
-
-        unsafe { POLLING_SYSTICK.syst = UnsafeCell::new(systick);};
-    }
-
-    pub fn now(& self) -> Instant {
-        if self.syst.into_inner().has_wrapped() {
-            self.counter.get_mut().0 += 1;
-        }
-        let ts = (unsafe { (*SYST::PTR).cvr.read() } / 80_000) as u64;
-        Instant::from_ticks(self.counter.into_inner() as u64 * TICK_HZ + ts)
-    }
-
-    unsafe fn reset(&mut self) {
-        *(self.syst.get()).clear_current();
-        self.systick.unwrap().enable_counter();
-    }
-
-    #[inline(always)]
-    fn set_compare(&mut self, _val: Instant) {
-        // No need to do something here, we get interrupts anyway.
-    }
-
-    #[inline(always)]
-    fn clear_compare_flag(&mut self) {
-        // NOOP with SysTick interrupt
-    }
-
-    #[inline(always)]
-    fn zero() -> Instant {
-        Instant::from_ticks(0)
-    }
-
-    #[inline(always)]
-    fn on_interrupt(&mut self) {
-        if self.systick.unwrap().has_wrapped() {
-            self.clock = self.clock.wrapping_add(1);
-        }
-    }
-}
-
-const ALARM_COUNT: usize = 3;
-
-fn calc_now(period: u32, counter: u16) -> u64 {
-    ((period as u64) << 15) + ((counter as u32 ^ ((period & 1) << 15)) as u64)
-}
+const ALARM_COUNT: usize = 1;
 
 struct AlarmState {
     timestamp: Cell<u64>,
@@ -153,7 +105,6 @@ impl SystickDriver {
     fn init(&'static self, cs: critical_section::CriticalSection) {}
 
     fn on_interrupt(&self) {
-        hprintln!("SystickDriver::on_interrupt()");
         critical_section::with(|cs| {
             for n in 0..ALARM_COUNT {
                 let alarm = &self.alarms.borrow(cs)[n];
@@ -189,6 +140,7 @@ impl SystickDriver {
     }
 
     fn trigger_alarm(&self, n: usize, cs: CriticalSection) {
+        hprintln!("trigger_alarm({} )", unsafe { CLOCK.now() });
         let alarm = &self.alarms.borrow(cs)[n];
         alarm.timestamp.set(u64::MAX);
 
@@ -207,7 +159,7 @@ impl Driver for SystickDriver {
         /*let period = self.period.load(Ordering::Relaxed);
         compiler_fence(Ordering::Acquire);
         calc_now(period, 1)*/
-        CLOCK_COUNTER.now().as_ticks()
+        unsafe { CLOCK.now() }
     }
 
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
