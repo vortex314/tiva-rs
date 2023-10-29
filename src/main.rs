@@ -8,6 +8,8 @@
 #![allow(unused_mut)]
 
 use alloc::boxed::Box;
+use embassy_time::Duration;
+use embassy_time::Timer;
 use embassy_time::time_driver_impl;
 use core::any::Any;
 use core::convert::Infallible;
@@ -171,13 +173,13 @@ async fn main(spawner: Spawner) {
         select_biased! {
             /*_ = get_timer_server().run().fuse() => {
                 hprintln!("timer_server_task done");
-            },
+            },*/
             _ = uart_actor.run().fuse() => {
                 hprintln!("uart_actor done");
             },
             _ = serde_actor.run().fuse() => {
                 hprintln!("serde_actor done");
-            },*/
+            },
             _ = led_actor.blink().fuse() => {
                 hprintln!("led_actor done");
             },
@@ -242,6 +244,8 @@ impl BytesWrapper<'_> {
     }
 }
 
+use crate::timer_driver::{CLOCK,usec};
+
 impl Serialize for BytesWrapper<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -271,6 +275,13 @@ impl SerdeActor {
         }
     }
 
+    pub async fn pub_me( &self) {
+        loop {
+            self.publish("src/tiva/sys/clock", &usec());
+            Timer::after(Duration::from_millis(100)).await;
+        }
+    }
+
     pub fn publish<T>(&self, topic: &str, payload: &T)
     where
         T: Serialize,
@@ -297,15 +308,15 @@ impl SerdeActor {
             .await;
         loop {
             select_biased! {
-                _ = self.timer_tick.recv().fuse() => {
+                _ = self.pub_me().fuse() => {
                     hprintln!("pubsub timer tick");
                     // self.keep_alive();
                 },
-                msg = self.rxd_sink.recv().fuse() => {
+               /*  msg = self.rxd_sink.recv().fuse() => {
                     hprintln!("pubsub rxd_sink.recv()");
                 },
                 msg = self.pubsub_msg.recv().fuse() => {
-                    hprintln!("pubsub pubsub_msg.recv()");
+                    hprintln!("pubsub pubsub_msg.recv()");*/
                     /*  match  msg  {
                         PubSubMsg::Pub(topic,x) => {
                             let mut serializer: Ser<'_> = Ser::new(self.buffer.as_mut());
@@ -323,8 +334,8 @@ impl SerdeActor {
 
                         }
                         _ => {}
-                    };*/
-                },
+                    };
+                },*/
 
             }
         }

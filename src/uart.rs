@@ -5,7 +5,7 @@ use futures::FutureExt;
 use crate::limero::Source;
 use embedded_hal::serial;
 use embedded_hal::serial::Read as Rx;
-
+use cortex_m_semihosting::hprintln;
 
 const FRAME_DELIMITER: u8 = '\n' as u8;
 
@@ -39,6 +39,7 @@ impl<'a> Uart<'a> {
         loop {
             select_biased! {
                 msg = self.txd_sink.recv().fuse() => {
+                    hprintln!("Uart::run() msg={:?}",msg);
                     for b in msg {
                         let _ = self.writer.write(b);
                     }

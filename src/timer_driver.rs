@@ -20,22 +20,28 @@ use embassy_time::driver::{AlarmHandle, Driver};
 use embassy_time::Instant;
 use embassy_time::TICK_HZ;
 
+const RELOAD_VALUE : u32 = 80_0000 - 1;
+
 pub struct Clock {
     msec: u64,
 }
 
-static mut CLOCK: Clock = Clock { msec: 0 };
+pub static mut CLOCK: Clock = Clock { msec: 0 };
 static mut SYSTICK: Option<SYST> = Option::None;
+
+pub fn usec() -> u64 {
+    unsafe { CLOCK.now() }
+}
 
 impl Clock {
     fn now(&self) -> u64 {
-        self.msec * 1000 + Self::get_current_usec() as u64
+        self.msec * 1000u64 + Self::get_current_usec() as u64
     }
 
     pub fn get_current_usec() -> u32 {
         if let Some(systick) = unsafe { SYSTICK.as_mut() } {
             let reg = unsafe { (*SYST::PTR).cvr.read() };
-            (80_0000 - reg) / 80
+            (RELOAD_VALUE - reg) / 80
         } else {
             0
         }
@@ -48,7 +54,7 @@ impl Clock {
         if let Some(systick) = unsafe { SYSTICK.as_mut() } {
             systick.disable_interrupt();
             systick.set_clock_source(SystClkSource::Core);
-            systick.set_reload(80_0000 - 1);
+            systick.set_reload(RELOAD_VALUE);
             systick.enable_counter();
             systick.enable_interrupt();
         };
