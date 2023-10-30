@@ -1,9 +1,12 @@
+use core::borrow::BorrowMut;
 use core::cell::Cell;
 use core::cell::UnsafeCell;
 use core::convert::TryInto;
 use core::num::Wrapping;
 use core::sync::atomic::{compiler_fence, AtomicU32, AtomicU8, Ordering};
 use core::{mem, ptr};
+
+use static_cell::StaticCell;
 
 use cortex_m::interrupt;
 use cortex_m::peripheral::syst;
@@ -22,8 +25,16 @@ use embassy_time::TICK_HZ;
 
 const RELOAD_VALUE : u32 = 80_0000 - 1;
 
+struct MyClock {
+    msec:u64,
+    syst: SYST,
+}
+
+static MYCLOCK: StaticCell<MyClock> = StaticCell::new();
+
 pub struct Clock {
     msec: u64,
+
 }
 
 pub static mut CLOCK: Clock = Clock { msec: 0 };
@@ -48,21 +59,18 @@ impl Clock {
     }
 
     pub fn init_timer_driver(syst: SYST) {
-        unsafe {
-            SYSTICK = Some(syst);
-        };
-        if let Some(systick) = unsafe { SYSTICK.as_mut() } {
-            systick.disable_interrupt();
-            systick.set_clock_source(SystClkSource::Core);
-            systick.set_reload(RELOAD_VALUE);
-            systick.enable_counter();
-            systick.enable_interrupt();
-        };
+        let    my_clock:&'static mut MyClock = MYCLOCK.init(MyClock { msec: 0, syst: syst });
+            my_clock.syst.disable_interrupt();
+            my_clock.syst.set_clock_source(SystClkSource::Core);
+            my_clock.syst.set_reload(RELOAD_VALUE);
+            my_clock.syst.enable_counter();
+            my_clock.syst.enable_interrupt();
     }
 }
 
 #[exception]
 fn SysTick() {
+    MYCLOCK.
     unsafe {
         CLOCK.msec += 1;
     }

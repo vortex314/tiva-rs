@@ -23,6 +23,7 @@ tm4c123x-hal = { version="0.10.3",features=["rt"] }
 rtt-target = { version = "0.4.0" }
 # HEAP 
 embedded-alloc="*"
+static_cell="*"
 # SERIALIZATION 
 serde-json-core = "0.5.1"
 serde_derive = {version="1.0", default_features = false}
