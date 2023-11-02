@@ -1,6 +1,6 @@
 use core::convert::Infallible;
 use futures::select_biased;
-use crate::limero::{Sink, get_timer_server,TimerMsg};
+use crate::limero::{Sink,};
 use futures::FutureExt;
 use crate::limero::Source;
 use embedded_hal::serial;
@@ -15,9 +15,8 @@ use void::Void;
 pub struct Uart<'a> {
     reader: &'a mut dyn serial::Read<u8,Error=Void>,
     writer: &'a mut dyn serial::Write<u8,Error = Void>,
-    timer_tick:Sink<TimerMsg> ,
-    pub txd_sink: Sink<Vec<u8>>,
-    pub rxd_source: Source<Vec<u8>>,
+    pub txd_sink: Sink<Vec<u8>,3>,
+    pub rxd_source: Source<'a,Vec<u8>>,
 }
 
 
@@ -27,16 +26,16 @@ impl<'a> Uart<'a> {
         Self {
             reader,
             writer,
-            timer_tick: Sink::<TimerMsg>::new(10),
-            txd_sink: Sink::<Vec<u8>>::new(10),
+            txd_sink: Sink::<Vec<u8>,3>::new(),
             rxd_source: Source::<Vec<u8>>::new(),
         }
     }
 
 
     pub async fn run(&mut self) -> Infallible {
-        get_timer_server().new_gate(100,  self.timer_tick.sender()).await;
+        hprintln!("Uart::run()");
         loop {
+            hprintln!("Uart::run() loop");
             select_biased! {
                 msg = self.txd_sink.recv().fuse() => {
                     hprintln!("Uart::run() msg={:?}",msg);
@@ -44,8 +43,7 @@ impl<'a> Uart<'a> {
                         let _ = self.writer.write(b);
                     }
                 }
-                _ = self.timer_tick.recv().fuse() => {
-                }
+               
             }
         }   
     }

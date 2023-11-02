@@ -6,8 +6,6 @@ use core::num::Wrapping;
 use core::sync::atomic::{compiler_fence, AtomicU32, AtomicU8, Ordering};
 use core::{mem, ptr};
 
-use static_cell::StaticCell;
-
 use cortex_m::interrupt;
 use cortex_m::peripheral::syst;
 use cortex_m::peripheral::{syst::SystClkSource, SYST};
@@ -23,26 +21,40 @@ use embassy_time::driver::{AlarmHandle, Driver};
 use embassy_time::Instant;
 use embassy_time::TICK_HZ;
 
-const RELOAD_VALUE : u32 = 80_0000 - 1;
-
-struct MyClock {
-    msec:u64,
-    syst: SYST,
-}
-
-static MYCLOCK: StaticCell<MyClock> = StaticCell::new();
+const RELOAD_VALUE: u32 = 80_000 - 1;
 
 pub struct Clock {
     msec: u64,
-
 }
 
 pub static mut CLOCK: Clock = Clock { msec: 0 };
-static mut SYSTICK: Option<SYST> = Option::None;
+use volatile_register::{RW, RO};
+/* 
+#[repr(C)]
+struct SysTick {
+    pub csr: RW<u32>,
+    pub rvr: RW<u32>,
+    pub cvr: RW<u32>,
+    pub calib: RO<u32>,
+}
 
+fn get_systick() -> &'static mut SysTick {
+    unsafe { &mut *(0xE000_E010 as *mut SysTick) }
+}
+
+fn get_time() -> u32 {
+    let systick = get_systick();
+    systick.cvr.read()
+}
+*/
 pub fn usec() -> u64 {
     unsafe { CLOCK.now() }
 }
+
+pub fn msec() -> u64 {
+    unsafe { CLOCK.msec }
+}
+
 
 impl Clock {
     fn now(&self) -> u64 {
@@ -50,27 +62,21 @@ impl Clock {
     }
 
     pub fn get_current_usec() -> u32 {
-        if let Some(systick) = unsafe { SYSTICK.as_mut() } {
             let reg = unsafe { (*SYST::PTR).cvr.read() };
             (RELOAD_VALUE - reg) / 80
-        } else {
-            0
-        }
     }
 
-    pub fn init_timer_driver(syst: SYST) {
-        let    my_clock:&'static mut MyClock = MYCLOCK.init(MyClock { msec: 0, syst: syst });
-            my_clock.syst.disable_interrupt();
-            my_clock.syst.set_clock_source(SystClkSource::Core);
-            my_clock.syst.set_reload(RELOAD_VALUE);
-            my_clock.syst.enable_counter();
-            my_clock.syst.enable_interrupt();
+    pub fn init_timer_driver(mut systick: SYST) {
+        systick.disable_interrupt();
+        systick.set_clock_source(SystClkSource::Core);
+        systick.set_reload(RELOAD_VALUE);
+        systick.enable_counter();
+        systick.enable_interrupt();
     }
 }
 
 #[exception]
 fn SysTick() {
-    MYCLOCK.
     unsafe {
         CLOCK.msec += 1;
     }
@@ -119,13 +125,14 @@ impl SystickDriver {
     fn init(&'static self, cs: critical_section::CriticalSection) {}
 
     fn on_interrupt(&self) {
+        let nu = self.now();
+
         critical_section::with(|cs| {
             for n in 0..ALARM_COUNT {
                 let alarm = &self.alarms.borrow(cs)[n];
                 let at = alarm.timestamp.get();
                 if at != u64::MAX {
-                    let t = self.now();
-                    if t >= at {
+                    if nu >= at {
                         self.trigger_alarm(n, cs);
                     }
                 }
@@ -134,6 +141,7 @@ impl SystickDriver {
     }
 
     fn next_period(&self) {
+        hprintln!("next_period({} )", unsafe { CLOCK.now() });
         // We only modify the period from the timer interrupt, so we know this can't race.
         let period = self.period.load(Ordering::Relaxed) + 1;
         self.period.store(period, Ordering::Relaxed);
@@ -154,7 +162,6 @@ impl SystickDriver {
     }
 
     fn trigger_alarm(&self, n: usize, cs: CriticalSection) {
-        hprintln!("trigger_alarm({} )", unsafe { CLOCK.now() });
         let alarm = &self.alarms.borrow(cs)[n];
         alarm.timestamp.set(u64::MAX);
 
@@ -197,11 +204,12 @@ impl Driver for SystickDriver {
     }
 
     fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
+ //       hprintln!("set_alarm({} ,{} )", timestamp,alarm.id());
+        let t = self.now();
         critical_section::with(|cs| {
             let n = alarm.id() as usize;
             let alarm = self.get_alarm(cs, alarm);
             alarm.timestamp.set(timestamp);
-            let t = self.now();
             if timestamp <= t {
                 // If alarm timestamp has passed the alarm will not fire.
                 // Disarm the alarm and return `false` to indicate that.
