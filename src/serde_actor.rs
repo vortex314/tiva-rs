@@ -102,7 +102,7 @@ impl SerdeActor<'_> {
         let crc_str = alloc::format!("{:04X}\r\n", crc);
         buffer[length..length + 6].copy_from_slice(crc_str.as_bytes());
         length += 6;
-        self.txd_source
+        let _ = self.txd_source
             .emit((buffer.as_slice()[0..length]).to_vec());
     }
 
@@ -165,10 +165,10 @@ impl SerdeActor<'_> {
             seq.end().unwrap();
             let length = serializer.end();
             let crc = Self::crc_calc(buffer.as_mut(), length);
-            self.txd_source
+            let _ = self.txd_source
                 .emit((buffer.as_slice()[0..length]).to_vec());
             let crc_str = alloc::format!("{:04X}\r\n", crc);
-            self.txd_source.emit(crc_str.as_bytes().to_vec());
+            let _= self.txd_source.emit(crc_str.as_bytes().to_vec());
             hprintln!("pubsub keep_alive() done");
         }
     }
