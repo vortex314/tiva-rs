@@ -1,6 +1,5 @@
 #![no_std]
 #![feature(type_alias_impl_trait)]
-#![feature(async_fn_in_trait)]
 //#![feature(noop_waker)]
 #![no_main]
 #![allow(deprecated)]
@@ -11,6 +10,8 @@
 
 use alloc::boxed::Box;
 use core::cell::Cell;
+use core::marker;
+use core::marker::PhantomData;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::any::TypeId;
@@ -35,6 +36,7 @@ use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::time_driver_impl;
 use embassy_time::Duration;
 use embassy_time::Timer;
+use embassy_futures::block_on;
 use futures::future::Lazy;
 use futures::select_biased;
 use futures::stream::Once;
@@ -119,21 +121,30 @@ async fn timer_server_task() {
     }
 }
 
+trait Publisher<T> {
+    fn publish(&mut self, value: T);
+}
+
+trait Subscriber<T> {
+    async fn next_message(&mut self) -> Option<T>;
+}
+
 struct Emitter<'a, T>
 where
-    T: 'static + Clone + Send,
+    T: Clone + Send,
 {
-    sender: Option<Cell<DynPublisher<'a, T>>>,
+    sender: Option<DynPublisher<'a, T>>,
+    publisher : Option<&'a dyn Publisher<T>>,
 }
 
 impl<'a, T> Emitter<'a, T>
 where
-    T: 'static + Clone + Send,
+    T: Clone + Send,
 {
     pub fn new() -> Self {
-        Emitter { sender: None }
+        Emitter { sender: None,publisher:None }
     }
-    pub fn bind(&mut self, sender: Cell<DynPublisher<'a, T>>) {
+    pub fn bind(&mut self, sender: DynPublisher<'a, T>) {
         if self.sender.is_none() {
             self.sender = Some(sender);
         } else {
@@ -143,35 +154,45 @@ where
             );
         }
     }
+    pub fn bind_publisher(&mut self, publisher: &'a dyn Publisher<T>) {
+        if self.publisher.is_none() {
+            self.publisher = Some(publisher);
+        } else {
+            panic!(
+                "Emitter already bound for type {}",
+                core::any::type_name::<T>()
+            );
+        }
+    }
 
-    pub fn to<const SIZE: usize>(&mut self, mut pipe:   Cell<Pipe<T, SIZE>>) {
-        self.bind(pipe.get_mut().sender().into());
+    pub fn to<const SIZE: usize>(&mut self, mut pipe:  &'a Pipe<'a,T, SIZE>) {
+        self.bind(pipe.input().into());
     }
     pub async fn emit(&mut self, value: T) {
         if self.sender.is_none() {
             return;
         }
         if let Some(sndr) = self.sender.as_mut(){
-            sndr.get_mut().publish(value).await; //todo test for some
+            sndr.publish(value).await; //todo test for some
         }
     }
 }
 
 struct Receptor<'a, T>
 where
-    T: 'static + Clone + Send,
+    T:  Clone + Send,
 {
-    receiver: Option<Cell<DynSubscriber<'a, T>>>,
+    receiver: Option<DynSubscriber<'a, T>>,
 }
 
 impl<'a, T> Receptor<'a, T>
 where
-    T: 'static + Clone + Send,
+    T:  Clone + Send,
 {
     pub fn new() -> Self {
         Receptor { receiver: None }
     }
-    pub fn bind(&mut self, receiver: Cell<DynSubscriber<'a, T>>) {
+    pub fn bind(&mut self, receiver: DynSubscriber<'a, T>) {
         if self.receiver.is_none() {
             self.receiver = Some(receiver);
         } else {
@@ -179,7 +200,7 @@ where
         }
     }
     pub fn from<const SIZE: usize>(&mut self, pipe: &'a Pipe<T, SIZE>) {
-        self.bind(pipe.receiver().into());
+        self.bind(pipe.output().into());
     }
 
     pub async fn receive(&mut self) -> T {
@@ -188,7 +209,7 @@ where
                 Timer::after(Duration::from_millis(100)).await;
             } else {
                 if let Some(rcvr) = self.receiver.as_mut(){
-                    let x = rcvr.get_mut().next_message_pure().await;
+                    let x = rcvr.next_message_pure().await;
                     return x;
                 }
             }
@@ -196,44 +217,58 @@ where
     }
 }
 
-struct Pipe<T, const CAP: usize = 1, const SUBS: usize = 1, const PUBS: usize = 1>
+struct Pipe<'a,T, const CAP: usize = 1, const SUBS: usize = 1, const PUBS: usize = 1>
 where
-    T: 'static + Clone + Send,
+    T : Clone + Send,
 {
     channel: PubSubChannel<NoopRawMutex, T, CAP, SUBS, PUBS>,
+    _marker: marker::PhantomData<&'a T>
 }
 
-impl<T, const CAP: usize, const SUBS: usize, const PUBS: usize> Pipe<T, CAP, SUBS, PUBS>
+impl<'a,T, const CAP: usize, const SUBS: usize, const PUBS: usize> Pipe<'a,T, CAP, SUBS, PUBS>
 where
-    T: 'static + Clone + Send,
+    T:  Clone + Send,
 {
     pub fn new() -> Self {
         Pipe {
             channel: PubSubChannel::<NoopRawMutex, T, CAP, SUBS, PUBS>::new(),
+            _marker: marker::PhantomData,
         }
     }
-    pub fn sender(&self) -> DynPublisher<T> {
+    pub fn input(&self) -> DynPublisher<T> {
         self.channel.dyn_publisher().unwrap()
     }
-    pub fn receiver(&self) -> DynSubscriber<T> {
+    pub fn output(&self) -> DynSubscriber<T> {
         self.channel.dyn_subscriber().unwrap()
     }
 }
 
-struct Transformer<T, U>
-where
-    T: 'static + Clone + Send,
-    U: 'static + Clone + Send,
-{
-    f: Box<dyn FnMut(T) -> U>,
-    receptor: Receptor<'static, T>,
-    emitter: Emitter<'static, U>,
+impl<'a,T,const CAP:usize> Publisher<T> for Pipe<'a,T,CAP> where T:Clone+Send{
+     fn publish(&mut self, value: T) {
+       block_on( self.channel.publisher().unwrap().publish(value));
+    }
 }
 
-impl<T, U> Transformer<T, U>
+impl<'a,T> Subscriber<T> for Pipe<'a,T> where T:Clone+Send{
+    async fn next_message(&mut self) -> Option<T> {
+        Some(self.channel.subscriber().unwrap().next_message_pure().await)
+    }
+}
+
+struct Transformer<'a,T, U>
 where
-    T: 'static + Clone + Send,
-    U: 'static + Clone + Send,
+    T:  Clone + Send,
+    U:  Clone + Send,
+{
+    f: Box<dyn FnMut(T) -> U>,
+    receptor: Receptor<'a, T>,
+    emitter: Emitter<'a, U>,
+}
+
+impl<'a,T, U> Transformer<'a,T, U>
+where
+    T:  Clone + Send,
+    U:  Clone + Send,
 {
     pub fn new(f: Box<dyn FnMut(T) -> U>) -> Self {
         Transformer {
@@ -254,18 +289,18 @@ where
     }
 }
 
-impl<'a, T, const S: usize> ShrAssign< Cell<Pipe<T, S>>> for Emitter<'a, T>
+impl<'a, T> ShrAssign< DynPublisher<'a,T>> for Emitter<'a, T>
 where
-    T: 'static + Clone + Send,
+    T: Clone + Send,
 {
-    fn shr_assign(&mut self, mut rhs:  Cell<Pipe<T, S>>) {
-        self.bind(rhs.get_mut().sender().into());
+    fn shr_assign(&mut self, mut rhs:  DynPublisher<'a,T>) {
+        self.bind(rhs);
     }
 }
 
-impl<'a, T, const S: usize> ShrAssign<&'a Receptor<'a, T>> for Pipe<T, S>
+impl<'a, T, const S: usize> ShrAssign<&'a Receptor<'a, T>> for Pipe<'a,T, S>
 where
-    T: 'static + Clone + Send,
+    T:  Clone + Send,
 {
     fn shr_assign(&mut self, rhs: &'a Receptor<'a, T>) {
         //    rhs.bind(self.receiver());
@@ -319,14 +354,19 @@ impl LedBlinker<'_> {
 async fn main(spawner: Spawner) {
     heap_setup();
     hprintln!("main started");
+// pipes defined here so they will be destroyed after actors are destroyed, stupid...
+    let channel1 = PubSubChannel::<NoopRawMutex, bool, 10,3,3>::new();
+    let pipe1 = Pipe::<bool, 10>::new();
+
     let mut wifi = Wifi::new();
     let mut led_1 = LedBlinker::new();
     let mut led_2 = LedBlinker::new();
-    let channel1 = PubSubChannel::<NoopRawMutex, u32, 10,3,3>::new();
 
-    let pipe1 = Cell::new(Pipe::<bool, 10>::new());
-    wifi.connected.to(pipe1);
-    wifi.connected >>= pipe1;
+    wifi.connected.to(&pipe1);
+
+    wifi.connected.bind_publisher(&pipe1);
+    wifi.connected.bind(channel1.dyn_publisher().unwrap());
+    wifi.connected >>= pipe1.input();
  //   led_1.blink_fast.from(pipe1);
  //   led_2.blink_fast.from(pipe1);
 
@@ -423,7 +463,4 @@ async fn main(spawner: Spawner) {
             },
         };
     }*/
-    drop(wifi);
-    drop(led_1);
-    drop(led_2);
 }

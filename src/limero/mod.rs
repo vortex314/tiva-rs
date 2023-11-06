@@ -40,11 +40,11 @@ impl<T: Default + Clone, const SIZE: usize> Sink<T, SIZE> {
     }
 }
 
-pub struct Source<'CH, T> {
-    senders: Vec<DynamicSender<'CH, T>>,
+pub struct Source<'a, T> {
+    senders: Vec<DynamicSender<'a, T>>,
 }
 
-impl<'CH, T: Default + Clone + Debug> Source<'CH, T>
+impl<'a, T: Default + Clone + Debug> Source<'a, T>
 where
     T: Clone + Send + 'static,
 {
