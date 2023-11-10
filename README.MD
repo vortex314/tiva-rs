@@ -18,6 +18,14 @@ This is a simple  project for the [Stellaris Launchpad](http://www.ti.com/tool/e
 - [Olimex Stellaris UEXT product page](https://www.olimex.com/Products/Modules/Adapters/STELLARIS-UEXT/open-source-hardware)
 - [Olimex Stellaris UEXT Schematic](https://www.olimex.com/Products/Modules/Adapters/STELLARIS-UEXT/resources/STELLARIS-UEXT_sch.pdf)
 
+## Too look at
+- [probe usage and embassy example](https://github.com/dkhayes117/propane-monitor-embassy)
+- [embassy on ESP32](https://github.com/ivmarkov/ruwm/blob/master/.cargo/config.toml)
+- [ async in embedded driver](https://cliffle.com/blog/composed-concurrency-in-drivers/)
+- [ general rust async](https://cliffle.com/blog/async-inversion/)
+
+
+
 # Embassy ( on hold ) 
 
 ## RUST setup embassy 

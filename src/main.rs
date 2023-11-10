@@ -81,9 +81,9 @@ struct Test {
 }
 
 extern crate alloc;
-use core::option::Option::Some;
-
 use crate::limero::Sink;
+use alloc::sync::Arc;
+use core::option::Option::Some;
 
 /*
 #[panic_handler]
@@ -134,7 +134,7 @@ Receptor ; property of an actor that receives events and acts upon it, if it is 
 
 // no return result for now
 trait Pub<'a, T> {
-    fn publish(&self, value: T);
+    fn publish(&mut self, value: T);
 }
 
 // async , will return None if error occurs
@@ -146,7 +146,7 @@ struct Emitter<'a, T>
 where
     T: Clone + Send,
 {
-    publisher: Option<&'a dyn Pub<'a, T>>,
+    publisher: Option<Box<dyn Pub<'a, T>>>,
 }
 
 impl<'a, T> Emitter<'a, T>
@@ -157,7 +157,7 @@ where
         Emitter { publisher: None }
     }
 
-    pub fn bind(&mut self, publisher: &'a dyn Pub<'a, T>) {
+    pub fn bind(&mut self, publisher: Box<dyn Pub<'a, T>>) {
         if self.publisher.is_none() {
             self.publisher = Some(publisher);
         } else {
@@ -168,7 +168,7 @@ where
         }
     }
 
-    pub fn to(&mut self, mut pipe: &'a dyn Pub<'a, T>) {
+    pub fn to(&mut self, mut pipe: Box<dyn Pub<'a, T>>) {
         self.bind(pipe);
     }
     pub async fn emit(&mut self, value: T) {
@@ -184,7 +184,7 @@ where
     T: Clone + Send,
 {
     //  receiver: Option<DynSubscriber<'a, T>>,
-    subscriber: Option<&'a dyn Sub<'a, T>>,
+    subscriber: Option<Box<dyn Sub<'a, T>>>,
 }
 
 impl<'a, T> Receptor<'a, T>
@@ -194,7 +194,7 @@ where
     pub fn new() -> Self {
         Receptor { subscriber: None }
     }
-    pub fn bind(&mut self, subscriber: &'a dyn Sub<'a, T>) {
+    pub fn bind(&mut self, subscriber: Box<dyn Sub<'a, T> >) {
         if self.subscriber.is_none() {
             self.subscriber = Some(subscriber);
         } else {
@@ -202,27 +202,26 @@ where
         }
     }
 
-    pub fn from(&mut self, mut pipe: &'a dyn Sub<'a, T>) {
+    pub fn from(&self, pipe: Box<dyn Sub<'a, T> >) {
         self.bind(pipe);
     }
 
     pub async fn receive(&mut self) -> T {
-        loop {
-            match self.subscriber {
-                Some(sub) => {sub.next().await},
-               None => {panic!(" get suscriber failed.")},
-            }
-        }
+        self.subscriber
+            .as_mut()
+            .expect("Receptor not bound")
+            .next()
+            .await
     }
 }
 
-struct Pipe<'a, T, const CAP: usize = 1, const SUBS: usize = 1, const PUBS: usize = 1>
+struct Pipe<'a:'static, T, const CAP: usize = 1, const SUBS: usize = 1, const PUBS: usize = 1>
 where
     T: Clone + Send,
 {
     channel: PubSubChannel<NoopRawMutex, T, CAP, SUBS, PUBS>,
     subscribers: Vec<DynSubscriber<'a, T>>,
-    _marker: marker::PhantomData<&'a T>,
+    //    _marker: marker::PhantomData<&'a T>,
 }
 
 impl<'a, T, const CAP: usize, const SUBS: usize, const PUBS: usize> Pipe<'a, T, CAP, SUBS, PUBS>
@@ -233,16 +232,43 @@ where
         Pipe {
             channel: PubSubChannel::<NoopRawMutex, T, CAP, SUBS, PUBS>::new(),
             subscribers: Vec::new(),
-            _marker: marker::PhantomData,
+            //    _marker: marker::PhantomData,
         }
     }
-}
+    pub fn sender<'b:'static>(&'static self) -> Box<impl Pub<'static, T> + 'static> {
+        struct Txd<'b, T1: Clone> {
+            dyn_pub: DynPublisher<'b, T1>,
+        }
+        impl<'b, T1: Clone> Pub<'b, T1> for Txd<'b, T1> {
+            fn publish(&mut self, value: T1) {
+                block_on(self.dyn_pub.publish(value));
+            }
+        }
+        Box::new(Txd::<'static, T> {
+            dyn_pub: self.channel.dyn_publisher().unwrap(),
+        })
+    }
 
+    pub fn receiver(&'a  self) -> Box<impl Sub<'a, T>> {
+        struct Rxd<'b, T1: Clone> {
+            dyn_sub: DynSubscriber<'b, T1>,
+        }
+        impl<'b, T1: Clone> Sub<'b, T1> for Rxd<'b, T1> {
+            fn next(&mut self) -> Pin<Box<dyn Future<Output = T1> + '_>> {
+                Box::pin(self.dyn_sub.next_message_pure())
+            }
+        }
+        Box::new(Rxd::<'a, T> {
+            dyn_sub: self.channel.dyn_subscriber().unwrap(),
+        })
+    }
+}
+/* 
 impl<'a, T, const CAP: usize> Pub<'a, T> for Pipe<'a, T, CAP>
 where
     T: Clone + Send,
 {
-    fn publish(&self, value: T) {
+    fn publish(&mut self, value: T) {
         block_on(self.channel.publisher().unwrap().publish(value));
     }
 }
@@ -252,17 +278,12 @@ where
     T: Clone + Send,
 {
     fn next(&mut self) -> Pin<Box<dyn Future<Output = T> + '_>> {
-        match self.channel.dyn_subscriber() {
-            Ok(sub) => {
-                self.subscribers.push(sub);
-                Box::pin(self.subscribers[0].next_message_pure())
-            }
-            Err(x) => {
-                panic!(" error occured on getting new subscriber");
-            }
-        }
+        let x = self.channel.dyn_subscriber().expect("msg");
+        self.subscribers.push(x);
+        Box::pin(self.subscribers.last().unwrap().next_message_pure())
     }
 }
+*/
 
 struct Transformer<'a, T, U>
 where
@@ -298,11 +319,11 @@ where
     }
 }
 
-impl<'a, T> ShrAssign<&'a dyn Pub<'a, T>> for Emitter<'a, T>
+impl<'a, T> ShrAssign<Box<dyn Pub<'a, T>>> for Emitter<'a, T>
 where
     T: Clone + Send,
 {
-    fn shr_assign(&mut self, mut rhs: &'a dyn Pub<'a, T>) {
+    fn shr_assign(&mut self, mut rhs: Box<dyn Pub<'a, T>>) {
         self.bind(rhs);
     }
 }
@@ -332,7 +353,7 @@ struct Wifi<'a> {
     pub connected: Emitter<'a, bool>,
 }
 
-impl Wifi<'_> {
+impl<'a> Wifi<'a> {
     fn new() -> Self {
         Wifi {
             connected: Emitter::new(),
@@ -358,31 +379,40 @@ impl LedBlinker<'_> {
     }
 }
 
-// #[cortex_m_rt::entry]
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    heap_setup();
-    hprintln!("main started");
-    // pipes defined here so they will be destroyed after actors are destroyed, stupid...
-    let mut pipe1 = Pipe::<bool, 10>::new();
+ async fn do_some_work() {
+    let  pipe1:Box<Pipe<'static,bool,10> > = Box::new(Pipe::<'static,bool, 10>::new());
 
     let mut wifi = Wifi::new();
     let mut led_1 = LedBlinker::new();
     let mut led_2 = LedBlinker::new();
 
-    wifi.connected.to(&pipe1);
-    wifi.connected.to(&pipe1);
+    let s1 = pipe1.sender();
+    let s2 = pipe1.sender();
+    let r1 = pipe1.receiver();
+    let r2 = pipe1.receiver();
 
-    led_1.blink_fast.from(&pipe1);
-    led_2.blink_fast.from(&pipe1);
+    wifi.connected.bind(s1);
+    wifi.connected.bind(s2);
 
+    led_1.blink_fast.bind(r1);
+    led_2.blink_fast.bind(r2);
+
+    wifi.connected.emit(true).await;
     led_1.blink_fast.receive().await;
 
     let negate_transformer = Transformer::new(Box::new(|x: bool| !x));
 
     wifi.connected.emit(true).await;
     wifi.connected.emit(false).await;
-    led_1.run().await;
+    led_1.run().await;}
+
+// #[cortex_m_rt::entry]
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    heap_setup();
+    hprintln!("main started");
+    // pipes defined here so they will be destroyed after actors are destroyed, stupid...
+    do_some_work().await;
 
     //  actor1.emitter >> queue(10) >> actor2.receptor;
     //  actor1.emitter >> transform(|x| x+1) >> actor2.receptor;
