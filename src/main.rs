@@ -7,6 +7,7 @@
 #![allow(unused_variables)]
 #![allow(unused_mut)]
 #![feature(const_type_id)]
+#![deny(elided_lifetimes_in_paths)]
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -126,27 +127,27 @@ async fn timer_server_task() {
 /*
 
 Emitter : property that emits values / messages if somebody is listening or not
-Publisher : the one that is used by Emitter to send relly the events
+Publisher : the one that is used by Emitter to send really the events
 Subscriber : creates a handle to a function that can be used to async receiev events
-Receptor ; property of an actor that receives events and acts upon it, if it is not connected it loops on a timer
+Receptor ; property of an actor that receives events and acts upon it, if it is not connected it will never receive a message 
 
 */
 
 // no return result for now
-trait Pub<'a, T> {
+trait Pub<'a, T>: 'a {
     fn publish(&mut self, value: T);
 }
 
 // async , will return None if error occurs
-trait Sub<'a, T> {
-    fn next(&mut self) -> Pin<Box<dyn Future<Output = T> + '_>>; //  -> Option<T>;
+trait Sub<'a, T>: 'a {
+    fn next(&mut self) -> Pin<Box<dyn Future<Output = T> + 'a>>; //  -> Option<T>;
 }
-
+//==============================================================================
 struct Emitter<'a, T>
 where
-    T: Clone + Send,
+    T: Clone + Send + 'a,
 {
-    publisher: Option<Box<dyn Pub<'a, T>>>,
+    publisher: Option<Box<dyn Pub<'a, T> +'a >>, // lifetime of publisher is same as emitter
 }
 
 impl<'a, T> Emitter<'a, T>
@@ -157,7 +158,7 @@ where
         Emitter { publisher: None }
     }
 
-    pub fn bind(&mut self, publisher: Box<dyn Pub<'a, T>>) {
+    pub fn bind(&mut self, publisher: Box<dyn Pub<'a, T> + 'a>) {
         if self.publisher.is_none() {
             self.publisher = Some(publisher);
         } else {
@@ -168,7 +169,7 @@ where
         }
     }
 
-    pub fn to(&mut self, mut pipe: Box<dyn Pub<'a, T>>) {
+    pub fn to(&mut self, mut pipe: Box<dyn Pub<'a, T> + '_>) {
         self.bind(pipe);
     }
     pub async fn emit(&mut self, value: T) {
@@ -178,23 +179,23 @@ where
         self.publisher.as_mut().unwrap().publish(value);
     }
 }
-
+//==============================================================================
 struct Receptor<'a, T>
 where
     T: Clone + Send,
 {
     //  receiver: Option<DynSubscriber<'a, T>>,
-    subscriber: Option<Box<dyn Sub<'a, T>>>,
+    subscriber: Option<Box<dyn Sub<'a, T>+'a >>,
 }
 
 impl<'a, T> Receptor<'a, T>
 where
-    T: Clone + Send,
+    T: Clone + Send + 'a,
 {
     pub fn new() -> Self {
         Receptor { subscriber: None }
     }
-    pub fn bind(&mut self, subscriber: Box<dyn Sub<'a, T> >) {
+    pub fn bind(&mut self, subscriber: Box<dyn Sub<'a, T>>) {
         if self.subscriber.is_none() {
             self.subscriber = Some(subscriber);
         } else {
@@ -202,11 +203,11 @@ where
         }
     }
 
-    pub fn from(&self, pipe: Box<dyn Sub<'a, T> >) {
+    pub fn from(&mut self, pipe: Box<dyn Sub<'a, T> + 'a>) {
         self.bind(pipe);
     }
 
-    pub async fn receive(&mut self) -> T {
+    pub async fn receive(&'a mut self) -> T {
         self.subscriber
             .as_mut()
             .expect("Receptor not bound")
@@ -214,8 +215,8 @@ where
             .await
     }
 }
-
-struct Pipe<'a:'static, T, const CAP: usize = 1, const SUBS: usize = 1, const PUBS: usize = 1>
+//==============================================================================
+struct Pipe<'a, T, const CAP: usize = 1, const SUBS: usize = 1, const PUBS: usize = 1>
 where
     T: Clone + Send,
 {
@@ -226,7 +227,7 @@ where
 
 impl<'a, T, const CAP: usize, const SUBS: usize, const PUBS: usize> Pipe<'a, T, CAP, SUBS, PUBS>
 where
-    T: Clone + Send,
+    T: Clone + Send + 'a,
 {
     pub fn new() -> Self {
         Pipe {
@@ -235,8 +236,12 @@ where
             //    _marker: marker::PhantomData,
         }
     }
-    pub fn sender<'b:'static>(&'static self) -> Box<impl Pub<'static, T> + 'static> {
-        struct Txd<'b, T1: Clone> {
+
+    pub fn sender(&'a self) -> Box<impl Pub<'a, T> + 'a> {
+        struct Txd<'b, T1>
+        where
+            T1: Clone + 'b,
+        {
             dyn_pub: DynPublisher<'b, T1>,
         }
         impl<'b, T1: Clone> Pub<'b, T1> for Txd<'b, T1> {
@@ -244,26 +249,30 @@ where
                 block_on(self.dyn_pub.publish(value));
             }
         }
-        Box::new(Txd::<'static, T> {
+
+        Box::new(Txd::<'a, T> {
             dyn_pub: self.channel.dyn_publisher().unwrap(),
         })
     }
 
-    pub fn receiver(&'a  self) -> Box<impl Sub<'a, T>> {
-        struct Rxd<'b, T1: Clone> {
+    pub fn receiver(&'a self) -> Box<dyn Sub<'_, T> + 'a> {
+        struct Rxd<'b, T1: Clone>
+        where
+            T1: Clone,
+        {
             dyn_sub: DynSubscriber<'b, T1>,
         }
         impl<'b, T1: Clone> Sub<'b, T1> for Rxd<'b, T1> {
-            fn next(&mut self) -> Pin<Box<dyn Future<Output = T1> + '_>> {
+            fn next(&mut self) -> Pin<Box<dyn Future<Output = T1>+'b>> {
                 Box::pin(self.dyn_sub.next_message_pure())
             }
         }
         Box::new(Rxd::<'a, T> {
             dyn_sub: self.channel.dyn_subscriber().unwrap(),
-        })
+        }) as Box<dyn Sub<'a, T>+'a>
     }
 }
-/* 
+/*
 impl<'a, T, const CAP: usize> Pub<'a, T> for Pipe<'a, T, CAP>
 where
     T: Clone + Send,
@@ -311,11 +320,11 @@ where
         (self.f)(value)
     }
     pub async fn receive(&mut self) {
-        loop {
+        /*loop {
             let x = self.receptor.receive().await;
             let y = self.transform(x);
             self.emitter.emit(y).await;
-        }
+        }*/
     }
 }
 
@@ -365,27 +374,32 @@ struct LedBlinker<'a> {
     pub blink_fast: Receptor<'a, bool>,
 }
 
-impl LedBlinker<'_> {
+impl<'a> LedBlinker<'a> {
     fn new() -> Self {
         LedBlinker {
             blink_fast: Receptor::new(),
         }
     }
-    pub async fn run(&mut self) {
-        loop {
-            let x = self.blink_fast.receive().await;
-            hprintln!("x={}", x);
-        }
+    pub async fn run(& mut self) {
+            self.blink_fast.receive().await;
     }
 }
 
- async fn do_some_work() {
-    let  pipe1:Box<Pipe<'static,bool,10> > = Box::new(Pipe::<'static,bool, 10>::new());
+/*use once_cell::sync::Lazy;
+
+static PIPE1: Lazy<Pipe<'static, bool, 10>> = Lazy::new(|| {
+    let mut p = Pipe::<'static, bool, 10>::new();
+    p
+});*/
+
+async fn do_some_work<'a>() {
+    let mut pipe1: Pipe<'_, bool, 10> = Pipe::<bool, 10>::new();
 
     let mut wifi = Wifi::new();
     let mut led_1 = LedBlinker::new();
     let mut led_2 = LedBlinker::new();
 
+    let x = pipe1.sender();
     let s1 = pipe1.sender();
     let s2 = pipe1.sender();
     let r1 = pipe1.receiver();
@@ -398,13 +412,16 @@ impl LedBlinker<'_> {
     led_2.blink_fast.bind(r2);
 
     wifi.connected.emit(true).await;
-    led_1.blink_fast.receive().await;
+//    wifi.connected >> led_1.blink_fast;
+//   wifi.connected >> led_2.blink_fast;
 
     let negate_transformer = Transformer::new(Box::new(|x: bool| !x));
 
     wifi.connected.emit(true).await;
     wifi.connected.emit(false).await;
-    led_1.run().await;}
+ //   led_1.run().await;
+    drop(led_1);
+}
 
 // #[cortex_m_rt::entry]
 #[embassy_executor::main]

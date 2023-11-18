@@ -32,7 +32,7 @@ impl<T: Default + Clone, const SIZE: usize> Sink<T, SIZE> {
     pub async fn recv(&mut self) -> T {
         self.channel.receiver().receive().await
     }
-    pub fn sender(&self) -> Sender<NoopRawMutex, T, SIZE> {
+    pub fn sender(&self) -> Sender<'_,NoopRawMutex, T, SIZE> {
         self.channel.sender()
     }
     pub fn on(&self, item: T) {
@@ -50,7 +50,7 @@ where
 {
     pub fn new() -> Self {
         Source {
-            senders: Vec::<DynamicSender<T>>::new(),
+            senders: Vec::<DynamicSender<'a,T>>::new(),
         }
     }
     pub async fn emit(&self, item: T) {
@@ -71,7 +71,7 @@ where
 
     fn shr(self, rhs: &'static Sink<T, N>) -> Self::Output {
         let d = rhs.channel.sender().clone();
-        let dy: DynamicSender<T> = d.into();
+        let dy: DynamicSender<'a,T> = d.into();
         self.senders.push(dy);
     }
 }

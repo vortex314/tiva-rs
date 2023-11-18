@@ -122,7 +122,7 @@ embassy_time::time_driver_impl!(static DRIVER: SystickDriver = SystickDriver {
 });
 
 impl SystickDriver {
-    fn init(&'static self, cs: critical_section::CriticalSection) {}
+    fn init(&'static self, cs: critical_section::CriticalSection<'static>) {}
 
     fn on_interrupt(&self) {
         let nu = self.now();
@@ -161,7 +161,7 @@ impl SystickDriver {
         unsafe { self.alarms.borrow(cs).get_unchecked(alarm.id() as usize) }
     }
 
-    fn trigger_alarm(&self, n: usize, cs: CriticalSection) {
+    fn trigger_alarm(&self, n: usize, cs: CriticalSection<'_>) {
         let alarm = &self.alarms.borrow(cs)[n];
         alarm.timestamp.set(u64::MAX);
 
@@ -223,6 +223,6 @@ impl Driver for SystickDriver {
     }
 }
 
-pub(crate) fn init(cs: CriticalSection) {
+pub(crate) fn init(cs: CriticalSection<'static>) {
     DRIVER.init(cs)
 }
