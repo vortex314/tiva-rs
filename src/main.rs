@@ -12,6 +12,7 @@
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use cortex_m::interrupt;
 use core::any::Any;
 use core::any::TypeId;
 use core::cell::Cell;
@@ -191,6 +192,7 @@ impl Sink<LedMsg> for Rc<RefCell<Led>> {
                 this.state = false;
             }
             LedMsg::Blink(t) => {
+                hprintln!("blink {}", t);
                 this.state = true;
                 // wait for t
                 this.state = false;
@@ -209,25 +211,47 @@ enum ButtonAction {
     Active,
 }
 struct Button {
-    event: Source<ButtonEvent>,
+    source: Source<ButtonEvent>,
 }
 impl Button {
     pub fn new() -> Self {
         Button {
-            event: Source::new(),
+            source: Source::new(),
         }
     }
+}
+
+struct Pipe<T> {
+    source: Source<T>,
+}
+
+impl<T> Sink<T> for Rc<RefCell<Pipe<T>>> {
+    fn on(&self, value: &T) {
+        self.borrow_mut().source.emit(value);
+    }
+}
+
+// interrupt handler wake ButtonActor
+struct ButtonActor {
+    action: ButtonAction,
+    receptor: Pipe<ButtonEvent>,
+    emitter: Source<ButtonEvent>,
+}
+#[interrupt]
+fn GPIOF() {
+    hprintln!("GPIOF");
+    //  button_actor.receptor.emit(&ButtonEvent::Pressed);
 }
 
 fn test() {
     let mut button = Button::new();
     let mut led = Rc::new(RefCell::new(Led::new()));
-    button.event.bind(Box::new(move |x| {
-        if *x == ButtonEvent::Pressed {
-            led.on(&LedMsg::Blink(300));
-        }
+    button.source.bind(Box::new(move |x| match x {
+        ButtonEvent::Pressed => led.on(&LedMsg::Blink(300)),
+        ButtonEvent::Released => led.on(&LedMsg::Blink(1000)),
     }));
-    button.event.emit(&ButtonEvent::Pressed);
+    button.source.emit(&ButtonEvent::Pressed);
+    button.source.emit(&ButtonEvent::Released);
 }
 
 // #[cortex_m_rt::entry]
@@ -271,6 +295,8 @@ async fn main(spawner: Spawner) {
     let mut portf = peripherals.GPIO_PORTF.split(&sysctl.power_control);
 
     let mut pin_red = portf.pf1.into_push_pull_output();
+    let switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
+    let switch1 = portf.pf4.into_pull_up_input();
     /*    let mut pin_blue = portf.pf2.into_push_pull_output();
     let mut pin_green = portf.pf3.into_push_pull_output();
 
