@@ -12,7 +12,8 @@
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use cortex_m::interrupt;
+use tm4c123x::interrupt;
+use tm4c_hal::gpio;
 use core::any::Any;
 use core::any::TypeId;
 use core::cell::Cell;
@@ -28,6 +29,8 @@ use core::pin::Pin;
 use core::task::Poll;
 use cortex_m::peripheral::SYST;
 use cortex_m_rt::exception;
+use cortex_m_rt::entry;
+
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
 use embassy_futures::block_on;
@@ -132,7 +135,7 @@ async fn timer_server_task() {
 
 Source : property that emits values / messages if somebody is listening or not
 Publisher : the one that is used by Source to send really the events
-Subscriber : creates a handle to a function that can be used to async receiev events
+Subscriber : creates a handle to a function that can be used to async receive events
 Receptor ; property of an actor that receives events and acts upon it, if it is not connected it will never receive a message
 
 wifi >> map(|x| match x {
@@ -146,24 +149,54 @@ trait Sink<T> {
     fn on(&self, value: &T);
 }
 struct Source<T> {
-    sinks: Vec<Box<dyn Fn(&T)>>,
+    sinks: Rc<RefCell<Vec<Box<dyn Fn(&T)>>>>,
 }
 
 impl<T> Source<T> {
     pub fn new() -> Self {
-        Source { sinks: Vec::new() }
+        Source { sinks: Rc::new(RefCell::new(Vec::new())) }
     }
 
-    pub fn bind(&mut self, sink: Box<dyn Fn(&T)>) {
-        self.sinks.push(sink)
+    pub fn bind(&self, sink: Box<dyn Fn(&T)>) {
+        self.sinks.borrow_mut().push(sink)
     }
 
     pub fn emit(&mut self, value: &T) {
-        for sink in self.sinks.iter() {
+        for sink in self.sinks.borrow().iter() {
             sink(&value);
         }
     }
 }
+/*#[derive(PartialEq, Debug)]
+struct SpinVector<T: Clone> {
+    vec: Vec<T>,
+}
+
+impl<T: Clone> Shr<usize> for SpinVector<T> {
+    type Output = Self;
+
+    fn shr(self, rhs: usize) -> Self::Output {
+        // Rotate the vector by `rhs` places.
+        let (a, b) = self.vec.split_at(self.vec.len() - rhs);
+        let mut spun_vector = vec![];
+        spun_vector.extend_from_slice(b);
+        spun_vector.extend_from_slice(a);
+        Self { vec: spun_vector }
+    }
+} */
+use core::ops::Shr;
+type Rhs<T> = Box<dyn Fn(&T)>;
+type Lhs<T> = Rc<RefCell<Source<T>>>;
+
+impl<T> Shr<Rhs<T>> for Source<T> {
+    type Output = ();
+
+    fn shr(self, rhs: Rhs<T>) -> Self::Output {
+        self.bind(rhs)
+    }
+}
+
+
 
 struct Led {
     state: bool,
@@ -232,13 +265,9 @@ impl<T> Sink<T> for Rc<RefCell<Pipe<T>>> {
 }
 
 // interrupt handler wake ButtonActor
-struct ButtonActor {
-    action: ButtonAction,
-    receptor: Pipe<ButtonEvent>,
-    emitter: Source<ButtonEvent>,
-}
+
 #[interrupt]
-fn GPIOF() {
+unsafe fn GPIOF() {
     hprintln!("GPIOF");
     //  button_actor.receptor.emit(&ButtonEvent::Pressed);
 }
@@ -246,6 +275,11 @@ fn GPIOF() {
 fn test() {
     let mut button = Button::new();
     let mut led = Rc::new(RefCell::new(Led::new()));
+    let ledclone = led.clone();
+    button.source >> (Box::new(move |x| match x {
+        ButtonEvent::Pressed => ledclone.on(&LedMsg::Blink(300)),
+        ButtonEvent::Released => ledclone.on(&LedMsg::Blink(1000)),
+    }));
     button.source.bind(Box::new(move |x| match x {
         ButtonEvent::Pressed => led.on(&LedMsg::Blink(300)),
         ButtonEvent::Released => led.on(&LedMsg::Blink(1000)),
@@ -295,8 +329,11 @@ async fn main(spawner: Spawner) {
     let mut portf = peripherals.GPIO_PORTF.split(&sysctl.power_control);
 
     let mut pin_red = portf.pf1.into_push_pull_output();
-    let switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
-    let switch1 = portf.pf4.into_pull_up_input();
+    let mut switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
+    let mut switch1 = portf.pf4.into_pull_up_input();
+    switch1.set_interrupt_mode(gpio::InterruptMode::LevelLow);
+    switch2.set_interrupt_mode(gpio::InterruptMode::LevelLow);
+
     /*    let mut pin_blue = portf.pf2.into_push_pull_output();
     let mut pin_green = portf.pf3.into_push_pull_output();
 
