@@ -447,19 +447,17 @@ async fn test() {
     button.actor.emit(&ButtonEvent::Released);
     let _ = &button.actor >> &log_button.actor;
     //   let _ = &button.actor >> &pressed_led_on.actor >> &led.actor;
+
     loop {
-        // hprintln!("loop");
-        loop {
-            select(button.run(), log_button.run()).await;
-        }
-        /*let _ = select4(
-            pressed_led_on.run(),
-            led.run(),
-            select(mqtt.run(), log_button.run()),
-            button.run(),
-        )
-        .await;*/
+        select(log_button.run(),button.run() ).await;
     }
+    /*let _ = select4(
+        pressed_led_on.run(),
+        led.run(),
+        select(mqtt.run(), log_button.run()),
+        button.run(),
+    )
+    .await;*/
 }
 
 // #[cortex_m_rt::entry]
