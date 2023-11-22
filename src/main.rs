@@ -212,6 +212,11 @@ where
             data: Rc::new(RefCell::new(ActorData::new(in_capacity, out_capacity))),
         }
     }
+    async fn recv(&self) -> CMD {
+        let mut cmd = [CMD::default()];
+        self.data.borrow_mut().cmds_reader.read(&mut cmd).await;
+        cmd[0].clone()
+    }
     /*
     async fn run(&mut self) -> () {
         let mut event = [EVENT::default()];
@@ -480,20 +485,9 @@ where
     }
     async fn run(&mut self) {
         loop {
-            let mut event = [EVENT::default()];
-            self.actor
-                .data
-                .borrow_mut()
-                .cmds_reader
-                .read(&mut event)
-                .await;
-            let cmd = (self.func)(&event[0]);
-            self.actor
-                .data
-                .borrow_mut()
-                .events_writer
-                .write(&[cmd])
-                .await;
+            let event = self.actor.recv().await;
+            let cmd = (self.func)(&event);
+            self.actor.emit(&cmd);
         }
     }
 }
@@ -533,21 +527,18 @@ async fn test() {
         ButtonEvent::Released => hprintln!("released"),
     });
 
-    /*button
-        .actor
-        .add_listener(Box::new(pressed_led_on.actor.clone()));
-    button
-        .actor
-        .add_listener(Box::new(log_button.actor.clone()));
-    pressed_led_on
-        .actor
-        .add_listener(Box::new(led.actor.clone()));*/
     button.actor.emit(&ButtonEvent::Pressed);
     button.actor.emit(&ButtonEvent::Released);
     let _ = &button.actor >> &log_button.actor;
     let _ = &button.actor >> &pressed_led_on.actor >> &led.actor;
-    let _ = select(mqtt.run(), log_button.run());
-    let _ = select4(button.run(), pressed_led_on.run(), led.run(), select(mqtt.run(), log_button.run()));
+    loop {
+        let _ = select4(
+            button.run(),
+            pressed_led_on.run(),
+            led.run(),
+            select(mqtt.run(), log_button.run()),
+        );
+    }
 }
 
 // #[cortex_m_rt::entry]
