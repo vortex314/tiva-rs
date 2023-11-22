@@ -5,21 +5,23 @@
 #![allow(deprecated)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
+#![allow(dead_code)]
 #![allow(unused_mut)]
 #![feature(const_type_id)]
 #![deny(elided_lifetimes_in_paths)]
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::ToString;
+use alloc::vec;
 use alloc::vec::Vec;
-use tm4c123x::interrupt;
-use tm4c_hal::gpio;
 use core::any::Any;
 use core::any::TypeId;
 use core::cell::Cell;
 use core::cell::RefCell;
 use core::cell::UnsafeCell;
 use core::convert::Infallible;
+use core::default;
 use core::fmt::Error;
 use core::fmt::Write;
 use core::marker;
@@ -28,8 +30,11 @@ use core::ops::ShrAssign;
 use core::pin::Pin;
 use core::task::Poll;
 use cortex_m::peripheral::SYST;
-use cortex_m_rt::exception;
 use cortex_m_rt::entry;
+use cortex_m_rt::exception;
+use mini_io_queue::storage::HeapBuffer;
+use tm4c123x::interrupt;
+use tm4c_hal::gpio;
 
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
@@ -125,12 +130,6 @@ use timer_driver::Clock;
 mod serde_actor;
 use serde_actor::SerdeActor;
 
-#[embassy_executor::task]
-async fn timer_server_task() {
-    loop {
-        hprintln!("timer_server_task");
-    }
-}
 /*
 
 Source : property that emits values / messages if somebody is listening or not
@@ -143,126 +142,322 @@ wifi >> map(|x| match x {
     WifiMsg::Disconnected => LedMsg::Off
 }) >> led
 */
-
+/*
+actor.on(cmd) --->[ ActorCmd ]--> run() {.. emit(ev) -- async recv() } --> [ ActorEvent ] -->
+Wiring
+ActorEvent --> Transform --> ActorCmd
+*/
 //==============================================================================
-trait Sink<T> {
+
+trait Listener<T> {
     fn on(&self, value: &T);
 }
-struct Source<T> {
-    sinks: Rc<RefCell<Vec<Box<dyn Fn(&T)>>>>,
+trait Publisher<T> {
+    fn add_listener(&self, listener: Box<dyn Listener<T>>) -> usize;
+    fn remove_listener(&self, listener_id: usize);
+    fn emit(&self, value: &T);
 }
 
-impl<T> Source<T> {
-    pub fn new() -> Self {
-        Source { sinks: Rc::new(RefCell::new(Vec::new())) }
+
+#[derive( Clone)]
+struct Actor<CMD, EVENT> {
+    cmds_reader: Rc<RefCell<asyncio::Reader<HeapBuffer<CMD>>>>,
+    cmds_writer: Rc<RefCell<asyncio::Writer<HeapBuffer<CMD>>>>,
+    events_reader: Rc<RefCell<asyncio::Reader<HeapBuffer<EVENT>>>>,
+    events_writer: Rc<RefCell<asyncio::Writer<HeapBuffer<EVENT>>>>,
+    listeners: Rc<RefCell<Vec<Box<dyn Listener<EVENT>>>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+enum NoEvent {
+    #[default]
+    Zero = 0,
+}
+#[derive(Debug, Clone, Default)]
+enum NoCmd {
+    #[default]
+    Zero = 0,
+}
+
+impl<CMD, EVENT> Actor<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    fn new(in_capacity: usize, out_capacity: usize) -> Self {
+        let (cmds_reader, cmds_writer) = asyncio::queue(in_capacity);
+        let (events_reader, events_writer) = asyncio::queue(out_capacity);
+        Actor {
+            cmds_reader: Rc::new(RefCell::new(cmds_reader)),
+            cmds_writer: Rc::new(RefCell::new(cmds_writer)),
+            events_reader: Rc::new(RefCell::new(events_reader)),
+            events_writer: Rc::new(RefCell::new(events_writer)),
+            listeners: Rc::new(RefCell::new(Vec::new())),
+        }
     }
 
-    pub fn bind(&self, sink: Box<dyn Fn(&T)>) {
-        self.sinks.borrow_mut().push(sink)
-    }
+    async fn run(&mut self) {
+        let mut event = [EVENT::default()];
+        self.events_reader.borrow_mut().read(&mut event).await;
 
-    pub fn emit(&mut self, value: &T) {
-        for sink in self.sinks.borrow().iter() {
-            sink(&value);
+        loop {
+            let mut cmd = [CMD::default()];
+            self.cmds_reader.borrow_mut().read(&mut cmd).await;
+            match cmd[0].clone() {
+                _ => {}
+            }
         }
     }
 }
-/*#[derive(PartialEq, Debug)]
-struct SpinVector<T: Clone> {
-    vec: Vec<T>,
+
+impl<CMD, EVENT> Listener<CMD> for Actor<CMD, EVENT>
+where
+    CMD: Clone,
+{
+    fn on(&self, cmd: &CMD) {
+        // sync write to queue
+        block_on(async {
+            if self.cmds_writer.borrow().has_space() {
+                self.cmds_writer.borrow_mut().write(&[cmd.clone()]).await;
+            }
+        });
+    }
 }
 
-impl<T: Clone> Shr<usize> for SpinVector<T> {
-    type Output = Self;
-
-    fn shr(self, rhs: usize) -> Self::Output {
-        // Rotate the vector by `rhs` places.
-        let (a, b) = self.vec.split_at(self.vec.len() - rhs);
-        let mut spun_vector = vec![];
-        spun_vector.extend_from_slice(b);
-        spun_vector.extend_from_slice(a);
-        Self { vec: spun_vector }
+impl<EVENT, CMD> Publisher<EVENT> for Actor<CMD, EVENT>
+where
+    EVENT: Clone,
+{
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
+        self.listeners.borrow_mut().push(listener);
+        self.listeners.borrow().len() - 1
     }
-} */
-use core::ops::Shr;
-type Rhs<T> = Box<dyn Fn(&T)>;
-type Lhs<T> = Rc<RefCell<Source<T>>>;
+    fn remove_listener(&self, listener_id: usize) {
+        self.listeners.borrow_mut().remove(listener_id);
+    }
+    fn emit(&self, value: &EVENT) {
+        // sync write to queue
+        block_on(async {
+            if self.events_writer.borrow().has_space() {
+                self.events_writer
+                    .borrow_mut()
+                    .write(&[value.clone()])
+                    .await;
+            }
+        });
+    }
+}
 
-impl<T> Shr<Rhs<T>> for Source<T> {
-    type Output = ();
+#[derive(Debug, Clone, Default)]
+enum MqttCmd {
+    #[default]
+    Connect,
+    Disconnect,
+    Publish(String, Vec<u8>),
+    Subscribe(String),
+    Unsubscribe(String),
+}
+
+#[derive(Debug, Clone, Default)]
+enum MqttEvent {
+    #[default]
+    Connected,
+    Disconnected,
+    Message(String, Vec<u8>),
+}
+use mini_io_queue::asyncio;
+struct Mqtt {
+    pub actor: Actor<MqttCmd, MqttEvent>,
+}
+
+impl Mqtt {
+    fn new() -> Self {
+        Mqtt {
+            actor: Actor::new(10, 10),
+        }
+    }
+    async fn run(&mut self) {
+        loop {
+            let mut cmd = [MqttCmd::default()];
+            self.actor.cmds_reader.borrow_mut().read(&mut cmd).await;
+            match cmd[0].clone() {
+                MqttCmd::Connect => {
+                    self.actor.emit(&MqttEvent::Connected);
+                    // connect
+                    // emit event
+                }
+                MqttCmd::Disconnect => {
+                    // disconnect
+                    // emit event
+                }
+                MqttCmd::Publish(topic, payload) => {
+                    // publish
+                    // emit event
+                }
+                MqttCmd::Subscribe(topic) => {
+                    // subscribe
+                    // emit event
+                }
+                MqttCmd::Unsubscribe(topic) => {
+                    // unsubscribe
+                    // emit event
+                }
+            }
+        }
+    }
+}
+
+impl Listener<MqttCmd> for Mqtt {
+    fn on(&self, value: &MqttCmd) {
+        self.actor.on(value);
+    }
+}
+impl Publisher<MqttEvent> for Mqtt {
+    #[inline(always)]
+    fn add_listener(&self, listener: Box<dyn Listener<MqttEvent>>) -> usize {
+        self.actor.add_listener(listener)
+    }
+    #[inline(always)]
+    fn remove_listener(&self, listener_id: usize) {
+        self.actor.remove_listener(listener_id)
+    }
+    #[inline(always)]
+    fn emit(&self, value: &MqttEvent) {
+        self.actor.emit(value)
+    }
+}
+
+use core::ops::Shr;
+type Rhs<T> = Box<dyn Listener<T>>;
+type Lhs<T> = Box<dyn Publisher<T>>;
+
+impl<T> Shr<Rhs<T>> for Lhs<T> {
+    type Output = usize;
 
     fn shr(self, rhs: Rhs<T>) -> Self::Output {
-        self.bind(rhs)
+        self.add_listener(rhs)
     }
 }
 
-
-
-struct Led {
-    state: bool,
-}
-
-impl Led {
-    pub fn new() -> Self {
-        Led { state: false }
-    }
-}
-
-enum LedMsg {
+#[derive(Debug, Clone, Default)]
+enum LedCmd {
+    #[default]
     On,
     Off,
     Blink(u32),
 }
+struct Led {
+    actor: Actor<LedCmd, NoEvent>,
+    state: Rc<RefCell<bool>>,
+}
 
-impl Sink<LedMsg> for Rc<RefCell<Led>> {
-    fn on(&self, value: &LedMsg) {
-        let mut this = self.borrow_mut();
-        match value {
-            LedMsg::On => {
-                this.state = true;
-            }
-            LedMsg::Off => {
-                this.state = false;
-            }
-            LedMsg::Blink(t) => {
-                hprintln!("blink {}", t);
-                this.state = true;
-                // wait for t
-                this.state = false;
+impl Led {
+    pub fn new() -> Self {
+        Led {
+            state: Rc::new(RefCell::new(false)),
+            actor: Actor::new(10, 0),
+        }
+    }
+    async fn run(&self) {
+        loop {
+            let mut cmd = [LedCmd::default()];
+            self.actor.cmds_reader.borrow_mut().read(&mut cmd).await;
+            match cmd[0].clone() {
+                LedCmd::On => {
+                    // connect
+                    // emit event
+                }
+                LedCmd::Off => {
+                    // disconnect
+                    // emit event
+                }
+                LedCmd::Blink(t) => {
+                    // publish
+                    // emit event
+                }
             }
         }
     }
 }
 
-#[derive(PartialEq)]
+impl Listener<LedCmd> for Led {
+    fn on(&self, value: &LedCmd) {
+        self.actor.on(value);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 enum ButtonEvent {
-    Pressed,
+    #[default]
     Released,
+    Pressed,
 }
-enum ButtonAction {
-    Idle,
-    Active,
-}
+
 struct Button {
-    source: Source<ButtonEvent>,
+    actor: Actor<NoCmd, ButtonEvent>,
 }
 impl Button {
     pub fn new() -> Self {
         Button {
-            source: Source::new(),
+            actor: Actor::new(0, 10),
         }
     }
 }
 
-struct Pipe<T> {
-    source: Source<T>,
-}
-
-impl<T> Sink<T> for Rc<RefCell<Pipe<T>>> {
-    fn on(&self, value: &T) {
-        self.borrow_mut().source.emit(value);
+impl Publisher<ButtonEvent> for Button {
+    #[inline(always)]
+    fn add_listener(&self, listener: Box<dyn Listener<ButtonEvent>>) -> usize {
+        self.actor.add_listener(listener)
+    }
+    #[inline(always)]
+    fn remove_listener(&self, listener_id: usize) {
+        self.actor.remove_listener(listener_id)
+    }
+    #[inline(always)]
+    fn emit(&self, value: &ButtonEvent) {
+        self.actor.emit(value)
     }
 }
+
+struct Flow<EVENT, CMD> {
+    pub actor: Actor<EVENT, CMD>,
+    func: fn(&EVENT) -> CMD,
+}
+
+impl<EVENT, CMD> Flow<EVENT, CMD>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    pub fn new(func: fn(&EVENT) -> CMD) -> Self {
+        Flow {
+            actor: Actor::new(1, 1),
+            func,
+        }
+    }
+    async fn run(&self) {
+        loop {
+            let mut event = [EVENT::default()];
+            self.actor.cmds_reader.borrow_mut().read(&mut event).await;
+            let cmd = (self.func)(&event[0]);
+            self.actor.events_writer.borrow_mut().write(&[cmd]).await;
+        }
+    }
+}
+/* 
+impl<'a,T, U, V> Shr<&'a Actor<U, V>> for Actor<T, U>
+where
+    T: Clone + Default,
+    U: Clone + Default,
+    V: Clone + Default,
+{
+    type Output = &'a Actor<U,V>;
+
+    fn shr(self, rhs: & Actor<U, V>) -> Self::Output {
+        self.add_listener(Box::new(*rhs));
+        rhs
+    }
+}*/
 
 // interrupt handler wake ButtonActor
 
@@ -273,19 +468,22 @@ unsafe fn GPIOF() {
 }
 
 fn test() {
+    let mut mqtt = Mqtt::new();
     let mut button = Button::new();
-    let mut led = Rc::new(RefCell::new(Led::new()));
-    let ledclone = led.clone();
-    button.source >> (Box::new(move |x| match x {
-        ButtonEvent::Pressed => ledclone.on(&LedMsg::Blink(300)),
-        ButtonEvent::Released => ledclone.on(&LedMsg::Blink(1000)),
-    }));
-    button.source.bind(Box::new(move |x| match x {
-        ButtonEvent::Pressed => led.on(&LedMsg::Blink(300)),
-        ButtonEvent::Released => led.on(&LedMsg::Blink(1000)),
-    }));
-    button.source.emit(&ButtonEvent::Pressed);
-    button.source.emit(&ButtonEvent::Released);
+    let mut led = Led::new();
+    let mut flow = Flow::new(|x| match x {
+        ButtonEvent::Pressed => LedCmd::On,
+        ButtonEvent::Released => LedCmd::Off,
+    });
+    let mut flow2 = Flow::new(|x| match x {
+        ButtonEvent::Pressed => MqttCmd::Connect,
+        ButtonEvent::Released => MqttCmd::Disconnect,
+    });
+
+    button.actor.add_listener(Box::new(flow.actor.clone()));
+    button.actor.add_listener(Box::new(flow2.actor.clone()));
+    flow.actor.add_listener(Box::new(led.actor));
+    flow2.actor.add_listener(Box::new(mqtt.actor));
 }
 
 // #[cortex_m_rt::entry]
