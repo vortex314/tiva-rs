@@ -39,6 +39,9 @@ use tm4c_hal::gpio;
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
 use embassy_futures::block_on;
+use embassy_futures::select::select;
+use embassy_futures::select::select4;
+
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel;
 use embassy_sync::channel::Channel;
@@ -158,14 +161,34 @@ trait Publisher<T> {
     fn emit(&self, value: &T);
 }
 
+struct ActorData<CMD, EVENT> {
+    cmds_reader: asyncio::Reader<HeapBuffer<CMD>>,
+    cmds_writer: asyncio::Writer<HeapBuffer<CMD>>,
+    events_reader: asyncio::Reader<HeapBuffer<EVENT>>,
+    events_writer: asyncio::Writer<HeapBuffer<EVENT>>,
+    listeners: Vec<Box<dyn Listener<EVENT>>>,
+}
 
-#[derive( Clone)]
+impl<CMD, EVENT> ActorData<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    fn new(in_capacity: usize, out_capacity: usize) -> Self {
+        let (cmds_reader, cmds_writer) = asyncio::queue(in_capacity);
+        let (events_reader, events_writer) = asyncio::queue(out_capacity);
+        ActorData {
+            cmds_reader,
+            cmds_writer,
+            events_reader,
+            events_writer,
+            listeners: Vec::new(),
+        }
+    }
+}
+
 struct Actor<CMD, EVENT> {
-    cmds_reader: Rc<RefCell<asyncio::Reader<HeapBuffer<CMD>>>>,
-    cmds_writer: Rc<RefCell<asyncio::Writer<HeapBuffer<CMD>>>>,
-    events_reader: Rc<RefCell<asyncio::Reader<HeapBuffer<EVENT>>>>,
-    events_writer: Rc<RefCell<asyncio::Writer<HeapBuffer<EVENT>>>>,
-    listeners: Rc<RefCell<Vec<Box<dyn Listener<EVENT>>>>>,
+    data: Rc<RefCell<ActorData<CMD, EVENT>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -185,27 +208,29 @@ where
     EVENT: Clone + Default,
 {
     fn new(in_capacity: usize, out_capacity: usize) -> Self {
-        let (cmds_reader, cmds_writer) = asyncio::queue(in_capacity);
-        let (events_reader, events_writer) = asyncio::queue(out_capacity);
         Actor {
-            cmds_reader: Rc::new(RefCell::new(cmds_reader)),
-            cmds_writer: Rc::new(RefCell::new(cmds_writer)),
-            events_reader: Rc::new(RefCell::new(events_reader)),
-            events_writer: Rc::new(RefCell::new(events_writer)),
-            listeners: Rc::new(RefCell::new(Vec::new())),
+            data: Rc::new(RefCell::new(ActorData::new(in_capacity, out_capacity))),
         }
     }
-
-    async fn run(&mut self) {
+    /*
+    async fn run(&mut self) -> () {
         let mut event = [EVENT::default()];
-        self.events_reader.borrow_mut().read(&mut event).await;
+        self.data.borrow_mut().events_reader.read(&mut event).await;
 
         loop {
             let mut cmd = [CMD::default()];
-            self.cmds_reader.borrow_mut().read(&mut cmd).await;
+            self.data.borrow_mut().cmds_reader.read(&mut cmd).await;
             match cmd[0].clone() {
                 _ => {}
             }
+        }
+    */
+}
+
+impl<C, E> Clone for Actor<C, E> {
+    fn clone(&self) -> Self {
+        Actor {
+            data: self.data.clone(),
         }
     }
 }
@@ -217,8 +242,12 @@ where
     fn on(&self, cmd: &CMD) {
         // sync write to queue
         block_on(async {
-            if self.cmds_writer.borrow().has_space() {
-                self.cmds_writer.borrow_mut().write(&[cmd.clone()]).await;
+            if self.data.borrow_mut().cmds_writer.has_space() {
+                self.data
+                    .borrow_mut()
+                    .cmds_writer
+                    .write(&[cmd.clone()])
+                    .await;
             }
         });
     }
@@ -229,18 +258,19 @@ where
     EVENT: Clone,
 {
     fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
-        self.listeners.borrow_mut().push(listener);
-        self.listeners.borrow().len() - 1
+        self.data.borrow_mut().listeners.push(listener);
+        self.data.borrow_mut().listeners.len() - 1
     }
     fn remove_listener(&self, listener_id: usize) {
-        self.listeners.borrow_mut().remove(listener_id);
+        self.data.borrow_mut().listeners.remove(listener_id);
     }
     fn emit(&self, value: &EVENT) {
         // sync write to queue
         block_on(async {
-            if self.events_writer.borrow().has_space() {
-                self.events_writer
+            if self.data.borrow_mut().events_writer.has_space() {
+                self.data
                     .borrow_mut()
+                    .events_writer
                     .write(&[value.clone()])
                     .await;
             }
@@ -279,7 +309,12 @@ impl Mqtt {
     async fn run(&mut self) {
         loop {
             let mut cmd = [MqttCmd::default()];
-            self.actor.cmds_reader.borrow_mut().read(&mut cmd).await;
+            self.actor
+                .data
+                .borrow_mut()
+                .cmds_reader
+                .read(&mut cmd)
+                .await;
             match cmd[0].clone() {
                 MqttCmd::Connect => {
                     self.actor.emit(&MqttEvent::Connected);
@@ -358,10 +393,15 @@ impl Led {
             actor: Actor::new(10, 0),
         }
     }
-    async fn run(&self) {
+    async fn run(&mut self) {
         loop {
             let mut cmd = [LedCmd::default()];
-            self.actor.cmds_reader.borrow_mut().read(&mut cmd).await;
+            self.actor
+                .data
+                .borrow_mut()
+                .cmds_reader
+                .read(&mut cmd)
+                .await;
             match cmd[0].clone() {
                 LedCmd::On => {
                     // connect
@@ -402,6 +442,9 @@ impl Button {
             actor: Actor::new(0, 10),
         }
     }
+    pub async fn run(&mut self) {
+        self.actor.emit(&ButtonEvent::Pressed);
+    }
 }
 
 impl Publisher<ButtonEvent> for Button {
@@ -435,29 +478,25 @@ where
             func,
         }
     }
-    async fn run(&self) {
+    async fn run(&mut self) {
         loop {
             let mut event = [EVENT::default()];
-            self.actor.cmds_reader.borrow_mut().read(&mut event).await;
+            self.actor
+                .data
+                .borrow_mut()
+                .cmds_reader
+                .read(&mut event)
+                .await;
             let cmd = (self.func)(&event[0]);
-            self.actor.events_writer.borrow_mut().write(&[cmd]).await;
+            self.actor
+                .data
+                .borrow_mut()
+                .events_writer
+                .write(&[cmd])
+                .await;
         }
     }
 }
-/* 
-impl<'a,T, U, V> Shr<&'a Actor<U, V>> for Actor<T, U>
-where
-    T: Clone + Default,
-    U: Clone + Default,
-    V: Clone + Default,
-{
-    type Output = &'a Actor<U,V>;
-
-    fn shr(self, rhs: & Actor<U, V>) -> Self::Output {
-        self.add_listener(Box::new(*rhs));
-        rhs
-    }
-}*/
 
 // interrupt handler wake ButtonActor
 
@@ -467,23 +506,48 @@ unsafe fn GPIOF() {
     //  button_actor.receptor.emit(&ButtonEvent::Pressed);
 }
 
-fn test() {
+impl<'a, T, U, V> Shr<&'a Actor<U, V>> for &'a Actor<T, U>
+where
+    T: Clone + Default + 'static,
+    U: Clone + Default + 'static,
+    V: Clone + Default + 'static,
+{
+    type Output = &'a Actor<U, V>;
+
+    fn shr(self, rhs: &'a Actor<U, V>) -> Self::Output {
+        self.add_listener(Box::new(rhs.clone()));
+        rhs
+    }
+}
+
+async fn test() {
     let mut mqtt = Mqtt::new();
     let mut button = Button::new();
     let mut led = Led::new();
-    let mut flow = Flow::new(|x| match x {
+    let mut pressed_led_on = Flow::new(|x| match x {
         ButtonEvent::Pressed => LedCmd::On,
         ButtonEvent::Released => LedCmd::Off,
     });
-    let mut flow2 = Flow::new(|x| match x {
-        ButtonEvent::Pressed => MqttCmd::Connect,
-        ButtonEvent::Released => MqttCmd::Disconnect,
+    let mut log_button = Flow::new(|x| match x {
+        ButtonEvent::Pressed => hprintln!("pressed"),
+        ButtonEvent::Released => hprintln!("released"),
     });
 
-    button.actor.add_listener(Box::new(flow.actor.clone()));
-    button.actor.add_listener(Box::new(flow2.actor.clone()));
-    flow.actor.add_listener(Box::new(led.actor));
-    flow2.actor.add_listener(Box::new(mqtt.actor));
+    /*button
+        .actor
+        .add_listener(Box::new(pressed_led_on.actor.clone()));
+    button
+        .actor
+        .add_listener(Box::new(log_button.actor.clone()));
+    pressed_led_on
+        .actor
+        .add_listener(Box::new(led.actor.clone()));*/
+    button.actor.emit(&ButtonEvent::Pressed);
+    button.actor.emit(&ButtonEvent::Released);
+    let _ = &button.actor >> &log_button.actor;
+    let _ = &button.actor >> &pressed_led_on.actor >> &led.actor;
+    let _ = select(mqtt.run(), log_button.run());
+    let _ = select4(button.run(), pressed_led_on.run(), led.run(), select(mqtt.run(), log_button.run()));
 }
 
 // #[cortex_m_rt::entry]
@@ -492,7 +556,7 @@ async fn main(spawner: Spawner) {
     heap_setup();
     hprintln!("main started");
     // pipes defined here so they will be destroyed after actors are destroyed, stupid...
-    test();
+    block_on(test());
     //  actor1.emitter >> queue(10) >> actor2.receptor;
     //  actor1.emitter >> transform(|x| x+1) >> actor2.receptor;
 
