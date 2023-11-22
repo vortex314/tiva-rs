@@ -164,8 +164,8 @@ trait Publisher<T> {
 struct ActorData<CMD, EVENT> {
     cmds_reader: asyncio::Reader<HeapBuffer<CMD>>,
     cmds_writer: asyncio::Writer<HeapBuffer<CMD>>,
-    events_reader: asyncio::Reader<HeapBuffer<EVENT>>,
-    events_writer: asyncio::Writer<HeapBuffer<EVENT>>,
+   // events_reader: asyncio::Reader<HeapBuffer<EVENT>>,
+   // events_writer: asyncio::Writer<HeapBuffer<EVENT>>,
     listeners: Vec<Box<dyn Listener<EVENT>>>,
 }
 
@@ -176,12 +176,12 @@ where
 {
     fn new(in_capacity: usize, out_capacity: usize) -> Self {
         let (cmds_reader, cmds_writer) = asyncio::queue(in_capacity);
-        let (events_reader, events_writer) = asyncio::queue(out_capacity);
+ //       let (events_reader, events_writer) = asyncio::queue(out_capacity);
         ActorData {
             cmds_reader,
             cmds_writer,
-            events_reader,
-            events_writer,
+//            events_reader,
+ //           events_writer,
             listeners: Vec::new(),
         }
     }
@@ -270,8 +270,11 @@ where
         self.data.borrow_mut().listeners.remove(listener_id);
     }
     fn emit(&self, value: &EVENT) {
+        for listener in self.data.borrow_mut().listeners.iter() {
+            listener.on(value);
+        }
         // sync write to queue
-        block_on(async {
+        /*  block_on(async {
             if self.data.borrow_mut().events_writer.has_space() {
                 self.data
                     .borrow_mut()
@@ -279,7 +282,7 @@ where
                     .write(&[value.clone()])
                     .await;
             }
-        });
+        });*/
     }
 }
 
