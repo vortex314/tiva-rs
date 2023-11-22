@@ -247,12 +247,9 @@ where
     fn on(&self, cmd: &CMD) {
         // sync write to queue
         block_on(async {
-            if self.data.borrow_mut().cmds_writer.has_space() {
-                self.data
-                    .borrow_mut()
-                    .cmds_writer
-                    .write(&[cmd.clone()])
-                    .await;
+            let mut data = self.data.borrow_mut();
+            if data.cmds_writer.has_space() {
+                data.cmds_writer.write(&[cmd.clone()]).await;
             }
         });
     }
@@ -277,7 +274,7 @@ where
             hprintln!("emit to listener");
             listener.on(value);
         }
-        /* 
+        /*
         block_on(async {
             if self.data.borrow_mut().events_writer.has_space() {
                 let x = self.data
@@ -431,7 +428,7 @@ impl Led {
         }
     }
 }
-/* 
+/*
 impl Listener<LedCmd> for Led {
     fn on(&self, value: &LedCmd) {
         self.actor.on(value);
@@ -455,14 +452,13 @@ impl Button {
         }
     }
     pub async fn run(&mut self) {
-            hprintln!("button sleep");
- //           Timer::after(Duration::from_millis(5000)).await;
-            hprintln!("button pressed");
-            self.actor.emit(&ButtonEvent::Pressed);
-
+        hprintln!("button sleep");
+        //           Timer::after(Duration::from_millis(5000)).await;
+        hprintln!("button pressed");
+        self.actor.emit(&ButtonEvent::Pressed);
     }
 }
-/* 
+/*
 impl Publisher<ButtonEvent> for Button {
     #[inline(always)]
     fn add_listener(&self, listener: Box<dyn Listener<ButtonEvent>>) -> usize {
@@ -544,13 +540,14 @@ async fn test() {
     let _ = &button.actor >> &log_button.actor;
     let _ = &button.actor >> &pressed_led_on.actor >> &led.actor;
     loop {
-       // hprintln!("loop");
+        // hprintln!("loop");
         let _ = select4(
-            button.run(),
             pressed_led_on.run(),
             led.run(),
             select(mqtt.run(), log_button.run()),
-        ).await;
+            button.run(),
+        )
+        .await;
     }
 }
 
@@ -634,8 +631,8 @@ async fn main(spawner: Spawner) {
     serde_actor.publish("src/tiva/sys/heap_size", &[1, 2, 3, 4]);
     let t = Test { x: 1, b: "hi" };
     serde_actor.publish("src/tiva/sys/test", &t);
-   // let mut led_actor = led::Led::new(&mut pin_red);
-  //  led_actor.active_sink.on(true);
+    // let mut led_actor = led::Led::new(&mut pin_red);
+    //  led_actor.active_sink.on(true);
     hprintln!("main loop started");
 
     /*loop {
