@@ -199,22 +199,14 @@ where
     }
     async fn recv(&self) -> CMD {
         let mut cmd = [CMD::default()];
-        self.data.borrow_mut().cmds_reader.read(&mut cmd).await;
+        hprintln!("I Actor waiting recv....");
+        let cnt = self.data.borrow_mut().cmds_reader.read(&mut cmd).await;
+        if cnt == 0 {
+            hprintln!("I Actor no cmd");
+        }
+        hprintln!("I Actor received event ");
         cmd[0].clone()
     }
-    /*
-    async fn run(&mut self) -> () {
-        let mut event = [EVENT::default()];
-        self.data.borrow_mut().events_reader.read(&mut event).await;
-
-        loop {
-            let mut cmd = [CMD::default()];
-            self.data.borrow_mut().cmds_reader.read(&mut cmd).await;
-            match cmd[0].clone() {
-                _ => {}
-            }
-        }
-    */
 }
 
 impl<CMD, EVENT> Listener<CMD> for Actor<CMD, EVENT>
@@ -222,13 +214,17 @@ where
     CMD: Clone,
 {
     fn on(&self, cmd: &CMD) {
-        // sync write to queue
-        block_on(async {
-            let mut data = self.data.borrow_mut();
-            if data.cmds_writer.has_space() {
-                data.cmds_writer.write(&[cmd.clone()]).await;
-            }
-        });
+        hprintln!("I Listener on ");
+        let mut data = self.data.borrow_mut();
+        if data.cmds_writer.has_space() {
+            hprintln!("I Listener write ....");
+            block_on(async {
+                let rc = data.cmds_writer.write(&[cmd.clone()]).await;
+                hprintln!("I Listener write done : {} ", rc);
+            });
+        } else {
+            hprintln!("W Listener no space");
+        };
     }
 }
 
@@ -245,26 +241,11 @@ where
         self.data.borrow_mut().listeners.remove(listener_id);
     }
     fn emit(&self, value: &EVENT) {
-        hprintln!("emit");
+        hprintln!("I emit()");
         for listener in self.data.borrow().listeners.iter() {
-            hprintln!("emit to listener");
+            hprintln!("I emit to listener");
             listener.on(value);
         }
-        /*
-        block_on(async {
-            if self.data.borrow_mut().events_writer.has_space() {
-                let x = self.data
-                    .borrow_mut()
-                    .events_writer
-                    .write(&[value.clone()])
-                    .await;
-                if  x==0  {
-                    hprintln!("no listener or buffer zero length");
-                }
-            } else {
-                hprintln!("no space");
-            }
-        });*/
     }
 }
 struct Flow<EVENT, CMD> {
@@ -278,14 +259,15 @@ where
 {
     pub fn new(func: fn(&EVENT) -> CMD) -> Self {
         Flow {
-            actor: Actor::new(1, 1),
+            actor: Actor::new(3, 3),
             func,
         }
     }
     async fn run(&mut self) {
         loop {
+            hprintln!("I Flow waiting recv....");
             let event = self.actor.recv().await;
-            hprintln!("flow received event ");
+            hprintln!("I Flow received event ");
             let cmd = (self.func)(&event);
             self.actor.emit(&cmd);
         }
@@ -419,9 +401,9 @@ impl Button {
         }
     }
     pub async fn run(&mut self) {
-        hprintln!("button sleep");
+        hprintln!("I Button sleep");
         //           Timer::after(Duration::from_millis(5000)).await;
-        hprintln!("button pressed");
+        hprintln!("I Button pressed");
         self.actor.emit(&ButtonEvent::Pressed);
     }
 }
@@ -464,7 +446,7 @@ async fn test() {
     button.actor.emit(&ButtonEvent::Pressed);
     button.actor.emit(&ButtonEvent::Released);
     let _ = &button.actor >> &log_button.actor;
-    let _ = &button.actor >> &pressed_led_on.actor >> &led.actor;
+    //   let _ = &button.actor >> &pressed_led_on.actor >> &led.actor;
     loop {
         // hprintln!("loop");
         loop {
