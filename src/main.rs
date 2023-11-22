@@ -1,6 +1,6 @@
 #![no_std]
 #![feature(type_alias_impl_trait)]
-//#![feature(noop_waker)]
+#![feature(noop_waker)]
 #![no_main]
 #![allow(deprecated)]
 #![allow(unused_imports)]
@@ -32,7 +32,6 @@ use core::task::Poll;
 use cortex_m::peripheral::SYST;
 use cortex_m_rt::entry;
 use cortex_m_rt::exception;
-use mini_io_queue::storage::HeapBuffer;
 use tm4c123x::interrupt;
 use tm4c_hal::gpio;
 
@@ -85,11 +84,21 @@ use alloc::string::String;
 use core::panic::PanicInfo;
 use panic_semihosting as _;
 
+use core::ops::Shr;
 use serde::ser::SerializeSeq;
 use serde::Serialize;
 use serde::Serializer;
 use serde_derive::Serialize;
 use serde_json_core::ser::Serializer as Ser;
+
+mod led;
+mod limero;
+mod uart;
+use uart::Uart;
+mod timer_driver;
+use timer_driver::Clock;
+mod serde_actor;
+use serde_actor::SerdeActor;
 
 #[derive(Serialize)]
 struct Test {
@@ -100,6 +109,8 @@ struct Test {
 extern crate alloc;
 use alloc::sync::Arc;
 use core::option::Option::Some;
+use mini_io_queue::asyncio;
+use mini_io_queue::storage::HeapBuffer;
 
 /*
 #[panic_handler]
@@ -123,35 +134,6 @@ const HEAP_SIZE: usize = 10240; // in bytes
 fn heap_setup() {
     unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
 }
-
-mod led;
-mod limero;
-mod uart;
-use uart::Uart;
-mod timer_driver;
-use timer_driver::Clock;
-mod serde_actor;
-use serde_actor::SerdeActor;
-
-/*
-
-Source : property that emits values / messages if somebody is listening or not
-Publisher : the one that is used by Source to send really the events
-Subscriber : creates a handle to a function that can be used to async receive events
-Receptor ; property of an actor that receives events and acts upon it, if it is not connected it will never receive a message
-
-wifi >> map(|x| match x {
-    WifiMsg::Connected => LedMsg::On,
-    WifiMsg::Disconnected => LedMsg::Off
-}) >> led
-*/
-/*
-actor.on(cmd) --->[ ActorCmd ]--> run() {.. emit(ev) -- async recv() } --> [ ActorEvent ] -->
-Wiring
-ActorEvent --> Transform --> ActorCmd
-*/
-//==============================================================================
-
 trait Listener<T> {
     fn on(&self, value: &T);
 }
@@ -164,11 +146,17 @@ trait Publisher<T> {
 struct ActorData<CMD, EVENT> {
     cmds_reader: asyncio::Reader<HeapBuffer<CMD>>,
     cmds_writer: asyncio::Writer<HeapBuffer<CMD>>,
-   // events_reader: asyncio::Reader<HeapBuffer<EVENT>>,
-   // events_writer: asyncio::Writer<HeapBuffer<EVENT>>,
+    // events_reader: asyncio::Reader<HeapBuffer<EVENT>>,
+    // events_writer: asyncio::Writer<HeapBuffer<EVENT>>,
     listeners: Vec<Box<dyn Listener<EVENT>>>,
 }
-
+impl<CMD, EVENT> Clone for Actor<CMD, EVENT> {
+    fn clone(&self) -> Self {
+        Actor {
+            data: Rc::clone(&self.data),
+        }
+    }
+}
 impl<CMD, EVENT> ActorData<CMD, EVENT>
 where
     CMD: Clone + Default,
@@ -176,21 +164,19 @@ where
 {
     fn new(in_capacity: usize, out_capacity: usize) -> Self {
         let (cmds_reader, cmds_writer) = asyncio::queue(in_capacity);
- //       let (events_reader, events_writer) = asyncio::queue(out_capacity);
+        //       let (events_reader, events_writer) = asyncio::queue(out_capacity);
         ActorData {
             cmds_reader,
             cmds_writer,
-//            events_reader,
- //           events_writer,
+            //            events_reader,
+            //           events_writer,
             listeners: Vec::new(),
         }
     }
 }
-
 struct Actor<CMD, EVENT> {
     data: Rc<RefCell<ActorData<CMD, EVENT>>>,
 }
-
 #[derive(Debug, Clone, Default)]
 enum NoEvent {
     #[default]
@@ -201,7 +187,6 @@ enum NoCmd {
     #[default]
     Zero = 0,
 }
-
 impl<CMD, EVENT> Actor<CMD, EVENT>
 where
     CMD: Clone + Default,
@@ -232,14 +217,6 @@ where
     */
 }
 
-impl<C, E> Clone for Actor<C, E> {
-    fn clone(&self) -> Self {
-        Actor {
-            data: self.data.clone(),
-        }
-    }
-}
-
 impl<CMD, EVENT> Listener<CMD> for Actor<CMD, EVENT>
 where
     CMD: Clone,
@@ -268,13 +245,8 @@ where
         self.data.borrow_mut().listeners.remove(listener_id);
     }
     fn emit(&self, value: &EVENT) {
-        for listener in self.data.borrow_mut().listeners.iter() {
-            listener.on(value);
-        }
-        // sync write to queue
-
         hprintln!("emit");
-        for listener in self.data.borrow_mut().listeners.iter() {
+        for listener in self.data.borrow().listeners.iter() {
             hprintln!("emit to listener");
             listener.on(value);
         }
@@ -295,7 +267,30 @@ where
         });*/
     }
 }
-
+struct Flow<EVENT, CMD> {
+    pub actor: Actor<EVENT, CMD>,
+    func: fn(&EVENT) -> CMD,
+}
+impl<EVENT, CMD> Flow<EVENT, CMD>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    pub fn new(func: fn(&EVENT) -> CMD) -> Self {
+        Flow {
+            actor: Actor::new(1, 1),
+            func,
+        }
+    }
+    async fn run(&mut self) {
+        loop {
+            let event = self.actor.recv().await;
+            hprintln!("flow received event ");
+            let cmd = (self.func)(&event);
+            self.actor.emit(&cmd);
+        }
+    }
+}
 #[derive(Debug, Clone, Default)]
 enum MqttCmd {
     #[default]
@@ -305,7 +300,6 @@ enum MqttCmd {
     Subscribe(String),
     Unsubscribe(String),
 }
-
 #[derive(Debug, Clone, Default)]
 enum MqttEvent {
     #[default]
@@ -313,7 +307,6 @@ enum MqttEvent {
     Disconnected,
     Message(String, Vec<u8>),
 }
-use mini_io_queue::asyncio;
 struct Mqtt {
     pub actor: Actor<MqttCmd, MqttEvent>,
 }
@@ -360,27 +353,6 @@ impl Mqtt {
     }
 }
 
-/*impl Listener<MqttCmd> for Mqtt {
-    fn on(&self, value: &MqttCmd) {
-        self.actor.on(value);
-    }
-}
-impl Publisher<MqttEvent> for Mqtt {
-    #[inline(always)]
-    fn add_listener(&self, listener: Box<dyn Listener<MqttEvent>>) -> usize {
-        self.actor.add_listener(listener)
-    }
-    #[inline(always)]
-    fn remove_listener(&self, listener_id: usize) {
-        self.actor.remove_listener(listener_id)
-    }
-    #[inline(always)]
-    fn emit(&self, value: &MqttEvent) {
-        self.actor.emit(value)
-    }
-}*/
-
-use core::ops::Shr;
 type Rhs<T> = Box<dyn Listener<T>>;
 type Lhs<T> = Box<dyn Publisher<T>>;
 
@@ -416,18 +388,9 @@ impl Led {
             let cmd = self.actor.recv().await;
             hprintln!("received event {:?}", cmd);
             match cmd {
-                LedCmd::On => {
-                    // connect
-                    // emit event
-                }
-                LedCmd::Off => {
-                    // disconnect
-                    // emit event
-                }
-                LedCmd::Blink(t) => {
-                    // publish
-                    // emit event
-                }
+                LedCmd::On => {}
+                LedCmd::Off => {}
+                LedCmd::Blink(t) => {}
             }
         }
     }
@@ -460,47 +423,6 @@ impl Button {
         //           Timer::after(Duration::from_millis(5000)).await;
         hprintln!("button pressed");
         self.actor.emit(&ButtonEvent::Pressed);
-    }
-}
-/*
-impl Publisher<ButtonEvent> for Button {
-    #[inline(always)]
-    fn add_listener(&self, listener: Box<dyn Listener<ButtonEvent>>) -> usize {
-        self.actor.add_listener(listener)
-    }
-    #[inline(always)]
-    fn remove_listener(&self, listener_id: usize) {
-        self.actor.remove_listener(listener_id)
-    }
-    #[inline(always)]
-    fn emit(&self, value: &ButtonEvent) {
-        self.actor.emit(value)
-    }
-}*/
-
-struct Flow<EVENT, CMD> {
-    pub actor: Actor<EVENT, CMD>,
-    func: fn(&EVENT) -> CMD,
-}
-
-impl<EVENT, CMD> Flow<EVENT, CMD>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    pub fn new(func: fn(&EVENT) -> CMD) -> Self {
-        Flow {
-            actor: Actor::new(1, 1),
-            func,
-        }
-    }
-    async fn run(&mut self) {
-        loop {
-            let event = self.actor.recv().await;
-            hprintln!("flow received event ");
-            let cmd = (self.func)(&event);
-            self.actor.emit(&cmd);
-        }
     }
 }
 
@@ -546,10 +468,7 @@ async fn test() {
     loop {
         // hprintln!("loop");
         loop {
-            select(
-                button.run(),
-                log_button.run(),
-            ).await;
+            select(button.run(), log_button.run()).await;
         }
         /*let _ = select4(
             pressed_led_on.run(),
