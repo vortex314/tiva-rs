@@ -264,6 +264,7 @@ where
 {
     fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
         self.data.borrow_mut().listeners.push(listener);
+        hprintln!("add_listener");
         self.data.borrow_mut().listeners.len() - 1
     }
     fn remove_listener(&self, listener_id: usize) {
@@ -271,15 +272,26 @@ where
     }
     fn emit(&self, value: &EVENT) {
         // sync write to queue
+        hprintln!("emit");
+        for listener in self.data.borrow_mut().listeners.iter() {
+            hprintln!("emit to listener");
+            listener.on(value);
+        }
+        /* 
         block_on(async {
             if self.data.borrow_mut().events_writer.has_space() {
-                self.data
+                let x = self.data
                     .borrow_mut()
                     .events_writer
                     .write(&[value.clone()])
                     .await;
+                if  x==0  {
+                    hprintln!("no listener or buffer zero length");
+                }
+            } else {
+                hprintln!("no space");
             }
-        });
+        });*/
     }
 }
 
@@ -347,7 +359,7 @@ impl Mqtt {
     }
 }
 
-impl Listener<MqttCmd> for Mqtt {
+/*impl Listener<MqttCmd> for Mqtt {
     fn on(&self, value: &MqttCmd) {
         self.actor.on(value);
     }
@@ -365,7 +377,7 @@ impl Publisher<MqttEvent> for Mqtt {
     fn emit(&self, value: &MqttEvent) {
         self.actor.emit(value)
     }
-}
+}*/
 
 use core::ops::Shr;
 type Rhs<T> = Box<dyn Listener<T>>;
@@ -400,14 +412,9 @@ impl Led {
     }
     async fn run(&mut self) {
         loop {
-            let mut cmd = [LedCmd::default()];
-            self.actor
-                .data
-                .borrow_mut()
-                .cmds_reader
-                .read(&mut cmd)
-                .await;
-            match cmd[0].clone() {
+            let cmd = self.actor.recv().await;
+            hprintln!("received event {:?}", cmd);
+            match cmd {
                 LedCmd::On => {
                     // connect
                     // emit event
@@ -424,12 +431,12 @@ impl Led {
         }
     }
 }
-
+/* 
 impl Listener<LedCmd> for Led {
     fn on(&self, value: &LedCmd) {
         self.actor.on(value);
     }
-}
+}*/
 
 #[derive(Debug, Clone, Default)]
 enum ButtonEvent {
@@ -448,10 +455,14 @@ impl Button {
         }
     }
     pub async fn run(&mut self) {
-        self.actor.emit(&ButtonEvent::Pressed);
+            hprintln!("button sleep");
+ //           Timer::after(Duration::from_millis(5000)).await;
+            hprintln!("button pressed");
+            self.actor.emit(&ButtonEvent::Pressed);
+
     }
 }
-
+/* 
 impl Publisher<ButtonEvent> for Button {
     #[inline(always)]
     fn add_listener(&self, listener: Box<dyn Listener<ButtonEvent>>) -> usize {
@@ -465,7 +476,7 @@ impl Publisher<ButtonEvent> for Button {
     fn emit(&self, value: &ButtonEvent) {
         self.actor.emit(value)
     }
-}
+}*/
 
 struct Flow<EVENT, CMD> {
     pub actor: Actor<EVENT, CMD>,
@@ -486,6 +497,7 @@ where
     async fn run(&mut self) {
         loop {
             let event = self.actor.recv().await;
+            hprintln!("flow received event ");
             let cmd = (self.func)(&event);
             self.actor.emit(&cmd);
         }
@@ -532,12 +544,13 @@ async fn test() {
     let _ = &button.actor >> &log_button.actor;
     let _ = &button.actor >> &pressed_led_on.actor >> &led.actor;
     loop {
+       // hprintln!("loop");
         let _ = select4(
             button.run(),
             pressed_led_on.run(),
             led.run(),
             select(mqtt.run(), log_button.run()),
-        );
+        ).await;
     }
 }
 
@@ -621,9 +634,10 @@ async fn main(spawner: Spawner) {
     serde_actor.publish("src/tiva/sys/heap_size", &[1, 2, 3, 4]);
     let t = Test { x: 1, b: "hi" };
     serde_actor.publish("src/tiva/sys/test", &t);
-    let mut led_actor = led::Led::new(&mut pin_red);
-    led_actor.active_sink.on(true);
+   // let mut led_actor = led::Led::new(&mut pin_red);
+  //  led_actor.active_sink.on(true);
     hprintln!("main loop started");
+
     /*loop {
         select_biased! {
             /*_ = get_timer_server().run().fuse() => {
