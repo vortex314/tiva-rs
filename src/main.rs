@@ -535,8 +535,8 @@ async fn test() {
         ButtonEvent::Released => LedCmd::Off,
     });
     let mut log_button = Flow::new(|x| match x {
-        ButtonEvent::Pressed => hprintln!("pressed"),
-        ButtonEvent::Released => hprintln!("released"),
+        ButtonEvent::Pressed => hprintln!("==> pressed"),
+        ButtonEvent::Released => hprintln!("==> released"),
     });
 
     button.actor.emit(&ButtonEvent::Pressed);
@@ -545,13 +545,19 @@ async fn test() {
     let _ = &button.actor >> &pressed_led_on.actor >> &led.actor;
     loop {
         // hprintln!("loop");
-        let _ = select4(
+        loop {
+            select(
+                button.run(),
+                log_button.run(),
+            ).await;
+        }
+        /*let _ = select4(
             pressed_led_on.run(),
             led.run(),
             select(mqtt.run(), log_button.run()),
             button.run(),
         )
-        .await;
+        .await;*/
     }
 }
 
