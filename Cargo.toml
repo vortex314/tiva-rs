@@ -8,6 +8,8 @@ name = "tiva-rs"
 version = "0.1.0"
 
 [features]
+default=["no_std"]
+no_std=[]
 alloc_error_handler = []
 
 [dependencies]
@@ -43,6 +45,7 @@ mini-io-queue = {  version = "0.2.0", default-features = false, features = ["asy
 # panic-semihosting = "0.6.0"
 # thingbuf ={ version = "0.1.4", default-features = false, features = ["alloc"] }
 # stakker = { version = "0.2.10", default-features = false, features = ["spin_no_std"] }
+log="*"
 
 [dependencies.linked_list_allocator]
 default-features = false

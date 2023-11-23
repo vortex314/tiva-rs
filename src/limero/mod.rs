@@ -1,77 +1,171 @@
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
-use core::borrow::Borrow;
-use core::convert::Infallible;
-use core::fmt::Debug;
-use core::pin::{pin, Pin};
-use cortex_m::interrupt;
-use cortex_m_semihosting::hprintln;
-/*
-use thingbuf::mpsc::{channel, RecvRef};
-use thingbuf::mpsc::{Receiver, Sender};*/
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::blocking_mutex::CriticalSectionMutex;
-use embassy_sync::channel::{self, DynamicReceiver};
-use embassy_sync::channel::{Channel, DynamicSender, Receiver, Sender};
-use embassy_sync::mutex::Mutex;
-use embassy_time::Duration;
-use embassy_time::Instant;
-use embassy_time::Timer;
+#[cfg(all(feature = "std", feature = "no_std"))]
+compile_error!("feature \"std\" and feature \"no_std\" cannot be enabled at the same time");
 
-pub struct Sink<T: Default + Clone, const SIZE: usize> {
-    channel: Channel<NoopRawMutex, T, SIZE>,
-}
+#[cfg(feature = "std")]
+use {
+    std::io::Write,
+    std::pin::pin,
+    std::rc::Rc,
+    std::sync::Arc,
+    std::thread::sleep,
+    std::time::{Duration, Instant},
+    std::{ops::Shr, pin::Pin},
+    tokio::task::block_in_place,
+};
 
-impl<T: Default + Clone, const SIZE: usize> Sink<T, SIZE> {
-    pub fn new() -> Self {
-        let channel = Channel::<NoopRawMutex, T, SIZE>::new();
-        Sink { channel }
-    }
-    pub async fn recv(&mut self) -> T {
-        self.channel.receiver().receive().await
-    }
-    pub fn sender(&self) -> Sender<'_,NoopRawMutex, T, SIZE> {
-        self.channel.sender()
-    }
-    pub fn on(&self, item: T) {
-        let _ = self.channel.sender().send(item);
-    }
-}
+#[cfg(feature = "no_std")]
+use {
+    alloc::boxed::Box, 
+    alloc::rc::Rc, 
+    alloc::vec::Vec, 
+    embassy_futures::block_on,
+};
 
-pub struct Source<'a, T> {
-    senders: Vec<DynamicSender<'a, T>>,
-}
-
-impl<'a, T: Default + Clone + Debug> Source<'a, T>
-where
-    T: Clone + Send + 'static,
-{
-    pub fn new() -> Self {
-        Source {
-            senders: Vec::<DynamicSender<'a,T>>::new(),
-        }
-    }
-    pub async fn emit(&self, item: T) {
-        hprintln!("Source::emit-1() item={:?}",item);
-        for sender in self.senders.iter() {
-            hprintln!("Source::emit-loop() sender={:?}",item);
-            let f = sender.send(item.clone()).await;
-        }
-    }
-}
-
+use core::cell::RefCell;
 use core::ops::Shr;
-impl<'a, T: 'static + Default, const N: usize> Shr<&'static Sink<T, N>> for &mut Source<'a, T>
-where
-    T: Clone + Send + 'static,
-{
-    type Output = ();
 
-    fn shr(self, rhs: &'static Sink<T, N>) -> Self::Output {
-        let d = rhs.channel.sender().clone();
-        let dy: DynamicSender<'a,T> = d.into();
-        self.senders.push(dy);
+use log::warn;
+use mini_io_queue::asyncio;
+use mini_io_queue::asyncio::queue;
+use mini_io_queue::storage::HeapBuffer;
+
+pub trait Listener<T> {
+    fn on(&self, value: &T);
+}
+pub trait Publisher<T> {
+    fn add_listener(&self, listener: Box<dyn Listener<T>>) -> usize;
+    fn remove_listener(&self, listener_id: usize);
+    fn emit(&self, value: &T);
+}
+pub struct Actor<CMD, EVENT> {
+    cmds_reader: Rc<RefCell<asyncio::Reader<HeapBuffer<CMD>>>>, // used by actor itself
+    cmds_writer: Rc<RefCell<asyncio::Writer<HeapBuffer<CMD>>>>, // used by external party talking to actor
+    listeners: Rc<RefCell<Vec<Box<dyn Listener<EVENT>>>>>,      // used by actor itself
+}
+impl<CMD, EVENT> Clone for Actor<CMD, EVENT> {
+    fn clone(&self) -> Self {
+        Actor {
+            cmds_reader: Rc::clone(&self.cmds_reader),
+            cmds_writer: Rc::clone(&self.cmds_writer),
+            listeners: Rc::clone(&self.listeners),
+        }
+    }
+}
+#[derive(Debug, Clone, Default)]
+pub enum NoEvent {
+    #[default]
+    Zero = 0,
+}
+#[derive(Debug, Clone, Default)]
+pub enum NoCmd {
+    #[default]
+    Zero = 0,
+}
+impl<CMD, EVENT> Actor<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    pub fn new(capacity: usize) -> Self {
+        let (mut reader, mut writer) = queue(capacity);
+        Actor {
+            cmds_reader: Rc::new(RefCell::new(reader)),
+            cmds_writer: Rc::new(RefCell::new(writer)),
+            listeners: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+    pub async fn recv(&self) -> CMD {
+        let mut cmd = [CMD::default()];
+        self.cmds_reader.borrow_mut().read(&mut cmd).await;
+        cmd[0].clone()
+    }
+}
+
+
+impl<CMD, EVENT> Listener<CMD> for Actor<CMD, EVENT>
+where
+    CMD: Clone +  Default,
+{
+    fn on(&self, cmd: &CMD) {
+        if self.cmds_writer.borrow().has_space() {
+            let buf = [cmd.clone()];
+#[cfg(feature = "std")]
+            block_in_place(|| {
+                futures::executor::block_on(self.cmds_writer.borrow_mut().write(&buf));
+            });
+#[cfg(feature = "no_std")]
+            block_on(async {
+                let rc = self.cmds_writer.borrow_mut().write(&[cmd.clone()]).await;
+            });
+        } else {
+            warn!("no space in actor queue");
+        }
+    }
+}
+
+impl<EVENT, CMD> Publisher<EVENT> for Actor<CMD, EVENT>
+where
+    EVENT: Clone,
+{
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
+        self.listeners.borrow_mut().push(listener);
+        self.listeners.borrow().len() - 1
+    }
+    fn remove_listener(&self, listener_id: usize) {
+        self.listeners.borrow_mut().remove(listener_id);
+    }
+    fn emit(&self, value: &EVENT) {
+        for listener in self.listeners.borrow().iter() {
+            listener.on(value);
+        }
+    }
+}
+pub struct Flow<EVENT, CMD> {
+    pub actor: Actor<EVENT, CMD>,
+    func: fn(&EVENT) -> CMD,
+}
+impl<EVENT, CMD> Flow<EVENT, CMD>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    pub fn new(func: fn(&EVENT) -> CMD) -> Self {
+        Flow {
+            actor: Actor::new(5),
+            func,
+        }
+    }
+    pub async fn run(&mut self) {
+        loop {
+            let event = self.actor.recv().await;
+            let cmd = (self.func)(&event);
+            self.actor.emit(&cmd);
+        }
+    }
+}
+
+type Rhs<T> = Box<dyn Listener<T>>;
+type Lhs<T> = Box<dyn Publisher<T>>;
+
+impl<T> Shr<Rhs<T>> for Lhs<T> {
+    type Output = usize;
+
+    fn shr(self, rhs: Rhs<T>) -> Self::Output {
+        self.add_listener(rhs)
+    }
+}
+
+impl<'a, T, U, V> Shr<&'a Actor<U, V>> for &'a Actor<T, U>
+where
+    T: Clone + Default + 'static,
+    U: Clone + Default + 'static,
+    V: Clone + Default + 'static,
+{
+    type Output = &'a Actor<U, V>;
+
+    fn shr(self, rhs: &'a Actor<U, V>) -> Self::Output {
+        self.add_listener(Box::new(rhs.clone()));
+        rhs
     }
 }
