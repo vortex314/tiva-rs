@@ -11,6 +11,13 @@
 #![deny(elided_lifetimes_in_paths)]
 
 mod timer_driver;
+use alloc::fmt::format;
+use cortex_m_semihosting::hprint;
+use embassy_time::Duration;
+use embassy_time::Timer;
+use log::Level;
+use log::Record;
+use log::SetLoggerError;
 use timer_driver::Clock;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -39,6 +46,8 @@ use tm4c123x_hal::{self as hal, prelude::*};
 use alloc::string::String;
 use panic_semihosting as _;
 use log::info;
+use log::LevelFilter;
+use log::Metadata;
 use serde_derive::Serialize;
 
 mod limero;
@@ -183,14 +192,19 @@ struct Button {
 impl Button {
     pub fn new() -> Self {
         Button {
-            actor: Actor::new(0),
+            actor: Actor::new(0), // no input queue neeeded
         }
     }
     pub async fn run(&mut self) {
-        hprintln!("I Button sleep");
-        //           Timer::after(Duration::from_millis(5000)).await;
-        hprintln!("I Button pressed");
-        self.actor.emit(&ButtonEvent::Pressed);
+        loop {
+            Timer::after(Duration::from_millis(1000)).await;
+            hprintln!("I Button pressed");
+            self.actor.emit(&ButtonEvent::Pressed);
+            Timer::after(Duration::from_millis(1000)).await;
+            hprintln!("I Button Released");
+            self.actor.emit(&ButtonEvent::Released);
+        }
+
     }
 }
 
@@ -242,6 +256,7 @@ async fn test() {
 async fn main(spawner: Spawner) {
     heap_setup();
     hprintln!("main started");
+    logger_init().unwrap();
     block_on(test());
 
     let mut peripherals = hal::Peripherals::take().unwrap();
@@ -307,4 +322,30 @@ async fn main(spawner: Spawner) {
     let (mut tx, mut rx) = uart.split();
     hprintln!("main loop started");
 
+}
+
+struct SimpleLogger;
+
+impl log::Log for SimpleLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() >= Level::Info
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if self.enabled(record.metadata()) {
+            let s = record.args().as_str().unwrap();
+            hprint!(s);
+            hprint!("\r\n");
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+
+static LOGGER: SimpleLogger = SimpleLogger;
+
+pub fn logger_init() -> Result<(), SetLoggerError> {
+    log::set_logger(&LOGGER)
+        .map(|()| log::set_max_level(LevelFilter::Info))
 }
