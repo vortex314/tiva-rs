@@ -257,7 +257,6 @@ async fn main(spawner: Spawner) {
     heap_setup();
     hprintln!("main started");
     logger_init().unwrap();
-    block_on(test());
 
     let mut peripherals = hal::Peripherals::take().unwrap();
     let mut sysctl = peripherals.SYSCTL.constrain();
@@ -269,6 +268,9 @@ async fn main(spawner: Spawner) {
     let clocks = sysctl.clock_setup.freeze();
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
     Clock::init_timer_driver(cortex_peripherals.SYST);
+
+    test().await;
+
 
     let tx_pin = porta_parts
         .pa1

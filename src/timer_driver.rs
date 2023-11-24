@@ -184,6 +184,7 @@ impl Driver for SystickDriver {
     }
 
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
+        hprintln!("allocate_alarm()");
         critical_section::with(|_| {
             let id = self.alarm_count.load(Ordering::Relaxed);
             if id < ALARM_COUNT as u8 {
@@ -196,6 +197,7 @@ impl Driver for SystickDriver {
     }
 
     fn set_alarm_callback(&self, alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut ()) {
+ //       hprintln!("set_alarm_callback({} ,{} )", callback as usize,alarm.id());
         critical_section::with(|cs| {
             let alarm = self.get_alarm(cs, alarm);
             alarm.callback.set(callback as *const ());
