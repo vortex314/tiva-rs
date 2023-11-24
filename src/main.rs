@@ -45,7 +45,7 @@ async fn test() {
     let mut button = Button::new();
     let mut led = Led::new();
     let mut pressed_led_on = Mapper::new(|x| match x {
-        ButtonEvent::Pressed => Some(LedCmd::Blink(1000)),
+        ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
         ButtonEvent::Released => Some(LedCmd::Blink(100)),
     });
     let mut log_button = Sink::new(|x| match x {

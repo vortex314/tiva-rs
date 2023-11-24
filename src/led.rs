@@ -25,7 +25,7 @@ impl Led {
         Led {
             state: Rc::new(RefCell::new(false)),
             actor: Actor::new(10),
-            interval_ms: Rc::new(RefCell::new(1000)),
+            interval_ms: Rc::new(RefCell::new(100)),
         }
     }
     pub async fn run(&mut self) {
@@ -33,6 +33,7 @@ impl Led {
             async {
                 loop {
                     let interval = Duration::from_millis(*self.interval_ms.borrow());
+                    info!("blinking interval {}", interval.as_millis());
                     Timer::after(interval).await;
                     self.state.replace(true);
                     Timer::after(interval).await;
