@@ -1,8 +1,7 @@
-
 #[cfg(all(feature = "std", feature = "no_std"))]
 compile_error!("feature \"std\" and feature \"no_std\" cannot be enabled at the same time");
 
-#[cfg(feature = "std")]
+#[cfg(feature = "tokio")]
 use {
     std::io::Write,
     std::pin::pin,
@@ -14,16 +13,11 @@ use {
     tokio::task::block_in_place,
 };
 
-#[cfg(feature = "no_std")]
-use {
-    alloc::boxed::Box, 
-    alloc::rc::Rc, 
-    alloc::vec::Vec, 
-    embassy_futures::block_on,
-};
+#[cfg(feature = "embassy")]
+use {alloc::boxed::Box, alloc::rc::Rc, alloc::vec::Vec, embassy_futures::block_on};
 
-use core::cell::RefCell;
 use core::ops::Shr;
+use core::{cell::RefCell, ops::Deref};
 
 use log::warn;
 use mini_io_queue::asyncio;
@@ -82,22 +76,24 @@ where
     }
 }
 
-
 impl<CMD, EVENT> Listener<CMD> for Actor<CMD, EVENT>
 where
-    CMD: Clone +  Default,
+    CMD: Clone + Default,
 {
     fn on(&self, cmd: &CMD) {
         if self.cmds_writer.borrow().has_space() {
             let buf = [cmd.clone()];
-#[cfg(feature = "std")]
+            let fut = async {
+                if self.cmds_writer.borrow_mut().write(&[cmd.clone()]).await != 1 {
+                    warn!("no reader ");
+                }
+            };
+            #[cfg(feature = "tokio")]
             block_in_place(|| {
-                futures::executor::block_on(self.cmds_writer.borrow_mut().write(&buf));
+                futures::executor::block_on(fut);
             });
-#[cfg(feature = "no_std")]
-            block_on(async {
-                let rc = self.cmds_writer.borrow_mut().write(&[cmd.clone()]).await;
-            });
+            #[cfg(feature = "embassy")]
+            block_on(fut);
         } else {
             warn!("no space in actor queue");
         }
@@ -145,17 +141,6 @@ where
     }
 }
 
-type Rhs<T> = Box<dyn Listener<T>>;
-type Lhs<T> = Box<dyn Publisher<T>>;
-
-impl<T> Shr<Rhs<T>> for Lhs<T> {
-    type Output = usize;
-
-    fn shr(self, rhs: Rhs<T>) -> Self::Output {
-        self.add_listener(rhs)
-    }
-}
-
 impl<'a, T, U, V> Shr<&'a Actor<U, V>> for &'a Actor<T, U>
 where
     T: Clone + Default + 'static,
@@ -165,6 +150,137 @@ where
     type Output = &'a Actor<U, V>;
 
     fn shr(self, rhs: &'a Actor<U, V>) -> Self::Output {
+        self.add_listener(Box::new(rhs.clone()));
+        rhs
+    }
+}
+
+//======================  Handler  ======================
+
+pub struct Mapper<CMD, EVENT> {
+    func: fn(&CMD) -> Option<EVENT>,
+    listeners: Rc<RefCell<Vec<Box<dyn Listener<EVENT>>>>>,
+}
+
+impl<CMD,EVENT> Clone for Mapper<CMD, EVENT> {
+    fn clone(&self) -> Self {
+        Mapper {
+            func: self.func,
+            listeners: Rc::clone(&self.listeners),
+        }
+    }
+}
+
+impl<EVENT, CMD> Mapper<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    pub fn new(func: fn(&CMD) -> Option<EVENT>) -> Self {
+        Mapper {
+            func,
+            listeners: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+}
+
+impl<CMD, EVENT> Listener<CMD> for Mapper<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    fn on(&self, cmd: &CMD) {
+        (self.func)(cmd).map(|e| self.emit(&e));
+    }
+}
+
+impl<EVENT, CMD> Publisher<EVENT> for Mapper<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
+        self.listeners.borrow_mut().push(listener);
+        self.listeners.borrow().len() - 1
+    }
+    fn remove_listener(&self, listener_id: usize) {
+        self.listeners.borrow_mut().remove(listener_id);
+    }
+    fn emit(&self, value: &EVENT) {
+        for listener in self.listeners.borrow().iter() {
+            listener.on(value);
+        }
+    }
+}
+//======================  Actor >> Handler >> ... ======================
+
+impl<'a, T, U, V> Shr<&'a Mapper<U, V>> for &'a Actor<T, U>
+where
+    T: Clone + Default + 'static,
+    U: Clone + Default + 'static,
+    V: Clone + Default + 'static,
+{
+    type Output = &'a Mapper<U, V>;
+
+    fn shr(self, rhs: &'a Mapper<U, V>) -> Self::Output {
+        self.add_listener(Box::new(rhs.clone()));
+        rhs
+    }
+}
+//======================  Handler >> Actor >> ... ======================
+
+impl<'a, T, U, V> Shr<&'a Actor<U, V>> for &'a Mapper<T, U>
+where
+    T: Clone + Default + 'static,
+    U: Clone + Default + 'static,
+    V: Clone + Default + 'static,
+{
+    type Output = &'a Actor<U, V>;
+
+    fn shr(self, rhs: &'a Actor<U, V>) -> Self::Output {
+        self.add_listener(Box::new(rhs.clone()));
+        rhs
+    }
+}
+//====================== Sink ======================
+
+pub struct Sink<CMD> {
+    func: fn(&CMD),
+}
+impl<CMD> Sink<CMD>
+where
+    CMD: Clone + Default,
+{
+    pub fn new(func: fn(&CMD)) -> Self {
+        Sink { func }
+    }
+}
+
+impl<CMD> Clone for Sink<CMD> {
+    fn clone(&self) -> Self {
+        Sink { func: self.func }
+    }
+}
+
+impl<CMD> Listener<CMD> for Sink<CMD>
+where
+    CMD: Clone + Default,
+{
+    fn on(&self, cmd: &CMD) {
+        (self.func)(cmd);
+    }
+}
+
+//======================  Actor >> Sink ======================
+
+impl<'a, T, U> Shr<&'a Sink<U>> for &'a Actor<T, U>
+where
+    T: Clone + Default + 'static,
+    U: Clone + Default + 'static,
+{
+    type Output = &'a Sink<U>;
+
+    fn shr(self, rhs: &'a Sink<U>) -> Self::Output {
         self.add_listener(Box::new(rhs.clone()));
         rhs
     }

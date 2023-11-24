@@ -19,6 +19,8 @@ use log::Level;
 use log::Record;
 use log::SetLoggerError;
 use timer_driver::Clock;
+extern crate alloc;
+
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -29,8 +31,8 @@ use tm4c_hal::gpio;
 
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
-use embassy_futures::block_on;
 use embassy_executor::Spawner;
+use embassy_futures::block_on;
 use embassy_time::driver::{AlarmHandle, Driver};
 
 use tm4c123x_hal::gpio::gpioa::PA0;
@@ -44,187 +46,43 @@ use tm4c123x_hal::sysctl::SysctlExt;
 use tm4c123x_hal::{self as hal, prelude::*};
 
 use alloc::string::String;
-use panic_semihosting as _;
 use log::info;
 use log::LevelFilter;
 use log::Metadata;
+use panic_semihosting as _;
 use serde_derive::Serialize;
 
 mod limero;
 use limero::Actor;
-use limero::Listener;
-use limero::Publisher;
 use limero::Flow;
-use limero::NoEvent;
+use limero::Listener;
+use limero::Mapper;
 use limero::NoCmd;
+use limero::NoEvent;
+use limero::Publisher;
+use limero::Sink;
 
-
-#[derive(Serialize)]
-struct Test {
-    x: u32,
-    b: &'static str,
-}
-
-extern crate alloc;
-
-#[exception]
-unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
-    hprintln!("{:#?}", ef);
-    loop {}
-}
-
-// HEAP allocation for embedded
-use embedded_alloc::Heap;
-#[global_allocator]
-static ALLOCATOR: Heap = Heap::empty();
-const HEAP_SIZE: usize = 10240; // in bytes
-fn heap_setup() {
-    unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
-}
-
+mod led;
+use led::*;
+mod button;
+use button::*;
 
 #[derive(Debug, Clone, Default)]
-enum MqttCmd {
+enum SysMsg {
     #[default]
-    Connect,
-    Disconnect,
-    Publish(String, Vec<u8>),
-    Subscribe(String),
-    Unsubscribe(String),
-}
-#[derive(Debug, Clone, Default)]
-enum MqttEvent {
-    #[default]
-    Connected,
-    Disconnected,
-    Message(String, Vec<u8>),
-}
-struct Mqtt {
-    pub actor: Actor<MqttCmd, MqttEvent>,
-}
-
-impl Mqtt {
-    fn new() -> Self {
-        Mqtt {
-            actor: Actor::new(10),
-        }
-    }
-    async fn run(&mut self) {
-        loop {
-            let mut cmd = self.actor.recv().await;
-            match cmd {
-                MqttCmd::Connect => {
-                    self.actor.emit(&MqttEvent::Connected);
-                    // connect
-                    // emit event
-                }
-                MqttCmd::Disconnect => {
-                    // disconnect
-                    // emit event
-                }
-                MqttCmd::Publish(topic, payload) => {
-                    // publish
-                    // emit event
-                }
-                MqttCmd::Subscribe(topic) => {
-                    // subscribe
-                    // emit event
-                }
-                MqttCmd::Unsubscribe(topic) => {
-                    // unsubscribe
-                    // emit event
-                }
-            }
-        }
-    }
-}
-
-
-
-#[derive(Debug, Clone, Default)]
-enum LedCmd {
-    #[default]
-    On,
-    Off,
-    Blink(u32),
-}
-struct Led {
-    actor: Actor<LedCmd, NoEvent>,
-    state: Rc<RefCell<bool>>,
-}
-
-impl Led {
-    pub fn new() -> Self {
-        Led {
-            state: Rc::new(RefCell::new(false)),
-            actor: Actor::new(10),
-        }
-    }
-    async fn run(&mut self) {
-        loop {
-            let cmd = self.actor.recv().await;
-            hprintln!("received event {:?}", cmd);
-            match cmd {
-                LedCmd::On => {}
-                LedCmd::Off => {}
-                LedCmd::Blink(t) => {}
-            }
-        }
-    }
-}
-/*
-impl Listener<LedCmd> for Led {
-    fn on(&self, value: &LedCmd) {
-        self.actor.on(value);
-    }
-}*/
-
-#[derive(Debug, Clone, Default)]
-enum ButtonEvent {
-    #[default]
-    Released,
-    Pressed,
-}
-
-struct Button {
-    actor: Actor<NoCmd, ButtonEvent>,
-}
-impl Button {
-    pub fn new() -> Self {
-        Button {
-            actor: Actor::new(0), // no input queue neeeded
-        }
-    }
-    pub async fn run(&mut self) {
-        loop {
-            Timer::after(Duration::from_millis(1000)).await;
-            hprintln!("I Button pressed");
-            self.actor.emit(&ButtonEvent::Pressed);
-            Timer::after(Duration::from_millis(1000)).await;
-            hprintln!("I Button Released");
-            self.actor.emit(&ButtonEvent::Released);
-        }
-
-    }
-}
-
-// interrupt handler wake ButtonActor
-
-#[interrupt]
-unsafe fn GPIOF() {
-    hprintln!("GPIOF");
-    //  button_actor.receptor.emit(&ButtonEvent::Pressed);
+    Start,
+    Stop,
+    Restart,
 }
 
 async fn test() {
-    let mut mqtt = Mqtt::new();
     let mut button = Button::new();
     let mut led = Led::new();
-    let mut pressed_led_on = Flow::new(|x| match x {
-        ButtonEvent::Pressed => LedCmd::On,
-        ButtonEvent::Released => LedCmd::Off,
+    let mut pressed_led_on = Mapper::new(|x| match x {
+        ButtonEvent::Pressed => Some(LedCmd::Blink(1000)),
+        ButtonEvent::Released => Some(LedCmd::Blink(100)),
     });
-    let mut log_button = Flow::new(|x| match x {
+    let mut log_button = Sink::new(|x| match x {
         ButtonEvent::Pressed => info!("==> pressed"),
         ButtonEvent::Released => info!("==> released"),
     });
@@ -238,18 +96,15 @@ async fn test() {
 
     button.actor.emit(&ButtonEvent::Pressed);
     button.actor.emit(&ButtonEvent::Released);
-    let _y = &button.actor >> &log_button.actor;
-    let _x = &button.actor >> &pressed_led_on.actor >> &led.actor;
+
+    let _ = &button.actor >> &log_button;
+    let _ = &button.actor >> &pressed_led_on >> &led.actor;
+
+    button.actor.add_listener(Box::new(pressed_led_on));
     loop {
-        embassy_futures::join::join4(
-            button.run(),
-            log_button.run(),
-            pressed_led_on.run(),
-            led.run(),
-        ).await;
+        embassy_futures::join::join(button.run(), led.run()).await;
     }
 }
-
 
 // #[cortex_m_rt::entry]
 #[embassy_executor::main]
@@ -269,13 +124,12 @@ async fn main(spawner: Spawner) {
     let mut cortex_peripherals = cortex_m::Peripherals::take().unwrap();
     Clock::init_timer_driver(cortex_peripherals.SYST);
 
-    test().await;
-
-
     let tx_pin = porta_parts
         .pa1
         .into_af_push_pull::<hal::gpio::AF1>(&mut porta_parts.control);
     let rx_pin = porta_parts.pa0.into_af_push_pull(&mut porta_parts.control);
+
+    test().await;
 
     let uart = hal::serial::Serial::uart0(
         peripherals.UART0,
@@ -323,7 +177,6 @@ async fn main(spawner: Spawner) {
 
     let (mut tx, mut rx) = uart.split();
     hprintln!("main loop started");
-
 }
 
 struct SimpleLogger;
@@ -336,6 +189,9 @@ impl log::Log for SimpleLogger {
     fn log(&self, record: &Record<'_>) {
         if self.enabled(record.metadata()) {
             let s = record.args().as_str().unwrap();
+            hprint!("[{}] ", record.level().as_str());
+            let t = msec();
+            hprint!("{} : ", t);
             hprint!(s);
             hprint!("\r\n");
         }
@@ -344,10 +200,25 @@ impl log::Log for SimpleLogger {
     fn flush(&self) {}
 }
 
-
 static LOGGER: SimpleLogger = SimpleLogger;
 
 pub fn logger_init() -> Result<(), SetLoggerError> {
-    log::set_logger(&LOGGER)
-        .map(|()| log::set_max_level(LevelFilter::Info))
+    log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info))
+}
+
+#[exception]
+unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
+    hprintln!("{:#?}", ef);
+    loop {}
+}
+
+// HEAP allocation for embedded
+use embedded_alloc::Heap;
+
+use crate::timer_driver::msec;
+#[global_allocator]
+static ALLOCATOR: Heap = Heap::empty();
+const HEAP_SIZE: usize = 10240; // in bytes
+fn heap_setup() {
+    unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) } // 👈
 }
