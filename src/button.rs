@@ -1,8 +1,5 @@
 use crate::limero::*;
-use alloc::boxed::Box;
-use alloc::rc::Rc;
-use alloc::vec::Vec;
-use core::cell::RefCell;
+
 use log::info;
 
 use embassy_time::Duration;
@@ -28,10 +25,10 @@ impl Button {
     pub async fn run(&mut self) {
         loop {
             Timer::after(Duration::from_millis(1000)).await;
-            info!("I Button pressed");
+            info!("send {:?}", ButtonEvent::Pressed);
             self.actor.emit(&ButtonEvent::Pressed);
             Timer::after(Duration::from_millis(1000)).await;
-            info!("I Button Released");
+            info!("send {:?}", ButtonEvent::Released);
             self.actor.emit(&ButtonEvent::Released);
         }
 

@@ -17,7 +17,7 @@ use {
 use {alloc::boxed::Box, alloc::rc::Rc, alloc::vec::Vec, embassy_futures::block_on};
 
 use core::ops::Shr;
-use core::{cell::RefCell, ops::Deref};
+use core::{cell::RefCell};
 
 use log::warn;
 use mini_io_queue::asyncio;

@@ -1,15 +1,8 @@
-use core::borrow::BorrowMut;
 use core::cell::Cell;
-use core::cell::UnsafeCell;
-use core::convert::TryInto;
-use core::num::Wrapping;
-use core::sync::atomic::{compiler_fence, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use core::{mem, ptr};
 
-use cortex_m::interrupt;
-use cortex_m::peripheral::syst;
 use cortex_m::peripheral::{syst::SystClkSource, SYST};
-use cortex_m::singleton;
 
 use cortex_m_rt::exception;
 
@@ -18,8 +11,7 @@ use critical_section::CriticalSection;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::driver::{AlarmHandle, Driver};
-use embassy_time::Instant;
-use embassy_time::TICK_HZ;
+
 
 const RELOAD_VALUE: u32 = 80_000 - 1;
 
@@ -28,7 +20,7 @@ pub struct Clock {
 }
 
 pub static mut CLOCK: Clock = Clock { msec: 0 };
-use volatile_register::{RW, RO};
+//use volatile_register::{RW, RO};
 /* 
 #[repr(C)]
 struct SysTick {

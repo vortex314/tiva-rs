@@ -3,7 +3,7 @@
 #![feature(noop_waker)]
 #![no_main]
 #![allow(deprecated)]
-#![allow(unused_imports)]
+//#![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
 #![allow(unused_mut)]
@@ -11,69 +11,35 @@
 #![deny(elided_lifetimes_in_paths)]
 
 mod timer_driver;
-use alloc::fmt::format;
-use cortex_m_semihosting::hprint;
-use embassy_time::Duration;
-use embassy_time::Timer;
-use log::Level;
-use log::Record;
-use log::SetLoggerError;
 use timer_driver::Clock;
 extern crate alloc;
 
-use alloc::boxed::Box;
-use alloc::rc::Rc;
-use alloc::vec::Vec;
-use core::cell::RefCell;
 use cortex_m_rt::exception;
-use tm4c123x::interrupt;
 use tm4c_hal::gpio;
 
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
 use embassy_executor::Spawner;
-use embassy_futures::block_on;
-use embassy_time::driver::{AlarmHandle, Driver};
 
-use tm4c123x_hal::gpio::gpioa::PA0;
-use tm4c123x_hal::gpio::gpioa::PA1;
-use tm4c123x_hal::gpio::AlternateFunction;
+
 use tm4c123x_hal::gpio::GpioExt;
-use tm4c123x_hal::gpio::PushPull;
-use tm4c123x_hal::gpio::AF1;
-use tm4c123x_hal::serial::Serial;
 use tm4c123x_hal::sysctl::SysctlExt;
 use tm4c123x_hal::{self as hal, prelude::*};
 
-use alloc::string::String;
 use log::info;
-use log::LevelFilter;
-use log::Metadata;
 use panic_semihosting as _;
-use serde_derive::Serialize;
 
 mod limero;
-use limero::Actor;
-use limero::Flow;
-use limero::Listener;
-use limero::Mapper;
-use limero::NoCmd;
-use limero::NoEvent;
-use limero::Publisher;
-use limero::Sink;
+use limero::*;
 
 mod led;
 use led::*;
 mod button;
 use button::*;
+mod logger;
+use logger::*;
 
-#[derive(Debug, Clone, Default)]
-enum SysMsg {
-    #[default]
-    Start,
-    Stop,
-    Restart,
-}
+
 
 async fn test() {
     let mut button = Button::new();
@@ -83,8 +49,8 @@ async fn test() {
         ButtonEvent::Released => Some(LedCmd::Blink(100)),
     });
     let mut log_button = Sink::new(|x| match x {
-        ButtonEvent::Pressed => info!("==> pressed"),
-        ButtonEvent::Released => info!("==> released"),
+        ButtonEvent::Pressed => info!("log pressed"),
+        ButtonEvent::Released => info!("log released"),
     });
 
     /*let _z = &button.actor
@@ -100,9 +66,8 @@ async fn test() {
     let _ = &button.actor >> &log_button;
     let _ = &button.actor >> &pressed_led_on >> &led.actor;
 
-    button.actor.add_listener(Box::new(pressed_led_on));
     loop {
-        embassy_futures::join::join(button.run(), led.run()).await;
+        embassy_futures::select::select(button.run(), led.run()).await;
     }
 }
 
@@ -176,35 +141,9 @@ async fn main(spawner: Spawner) {
     });*/
 
     let (mut tx, mut rx) = uart.split();
-    hprintln!("main loop started");
+    info!("main loop started");
 }
 
-struct SimpleLogger;
-
-impl log::Log for SimpleLogger {
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.level() >= Level::Info
-    }
-
-    fn log(&self, record: &Record<'_>) {
-        if self.enabled(record.metadata()) {
-            let s = record.args().as_str().unwrap();
-            hprint!("[{}] ", record.level().as_str());
-            let t = msec();
-            hprint!("{} : ", t);
-            hprint!(s);
-            hprint!("\r\n");
-        }
-    }
-
-    fn flush(&self) {}
-}
-
-static LOGGER: SimpleLogger = SimpleLogger;
-
-pub fn logger_init() -> Result<(), SetLoggerError> {
-    log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info))
-}
 
 #[exception]
 unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
@@ -215,7 +154,6 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
 // HEAP allocation for embedded
 use embedded_alloc::Heap;
 
-use crate::timer_driver::msec;
 #[global_allocator]
 static ALLOCATOR: Heap = Heap::empty();
 const HEAP_SIZE: usize = 10240; // in bytes
