@@ -1,13 +1,22 @@
+/*
+SemiHosting logger to debug port of probe 
+*/
+
 use alloc::string::ToString;
 use cortex_m_semihosting::hprintln;
 
-use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
 use crate::timer_driver::msec;
+use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
 
+struct SemiLogger;
 
-struct SimpleLogger;
+pub static SEMI_LOGGER: SemiLogger = SemiLogger;
 
-impl log::Log for SimpleLogger {
+pub fn semi_logger_init() -> Result<(), SetLoggerError> {
+    log::set_logger(&SEMI_LOGGER).map(|()| log::set_max_level(LevelFilter::Info))
+}
+
+impl log::Log for SemiLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         metadata.level() >= Level::Info
     }
@@ -28,10 +37,4 @@ impl log::Log for SimpleLogger {
     }
 
     fn flush(&self) {}
-}
-
-static LOGGER: SimpleLogger = SimpleLogger;
-
-pub fn logger_init() -> Result<(), SetLoggerError> {
-    log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info))
 }

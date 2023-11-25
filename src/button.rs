@@ -1,6 +1,5 @@
 use crate::limero::*;
 
-use log::info;
 
 use embassy_time::Duration;
 use embassy_time::Timer;
@@ -24,11 +23,9 @@ impl Button {
     }
     pub async fn run(&mut self) {
         loop {
-            Timer::after(Duration::from_millis(1000)).await;
-            info!("send {:?}", ButtonEvent::Pressed);
+            Timer::after(Duration::from_millis(3000)).await;
             self.actor.emit(&ButtonEvent::Pressed);
-            Timer::after(Duration::from_millis(1000)).await;
-            info!("send {:?}", ButtonEvent::Released);
+            Timer::after(Duration::from_millis(3000)).await;
             self.actor.emit(&ButtonEvent::Released);
         }
 

@@ -3,24 +3,23 @@
 #![feature(noop_waker)]
 #![no_main]
 #![allow(deprecated)]
-//#![allow(unused_imports)]
+#![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![feature(const_type_id)]
 #![deny(elided_lifetimes_in_paths)]
 
-mod timer_driver;
-use timer_driver::Clock;
 extern crate alloc;
 
+
+use alloc::boxed::Box;
 use cortex_m_rt::exception;
-use tm4c_hal::gpio;
+use tm4c_hal::{gpio, serial};
 
 use cortex_m_rt::ExceptionFrame;
 use cortex_m_semihosting::hprintln;
 use embassy_executor::Spawner;
-
 
 use tm4c123x_hal::gpio::GpioExt;
 use tm4c123x_hal::sysctl::SysctlExt;
@@ -36,47 +35,22 @@ mod led;
 use led::*;
 mod button;
 use button::*;
-mod logger;
-use logger::*;
+mod semi_logger;
+use semi_logger::*;
+mod timer_driver;
+use timer_driver::Clock;
 
+mod serial_logger;
+// use serial_logger::serial_logger_init;
 
-
-async fn test() {
-    let mut button = Button::new();
-    let mut led = Led::new();
-    let mut pressed_led_on = Mapper::new(|x| match x {
-        ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
-        ButtonEvent::Released => Some(LedCmd::Blink(100)),
-    });
-    let mut log_button = Sink::new(|x| match x {
-        ButtonEvent::Pressed => info!("log pressed"),
-        ButtonEvent::Released => info!("log released"),
-    });
-
-    /*let _z = &button.actor
-    >> &map(|x| match x {
-        ButtonEvent::Pressed => LedCmd::On,
-        ButtonEvent::Released => LedCmd::Off,
-    })
-    >> &led.actor; */
-
-    button.actor.emit(&ButtonEvent::Pressed);
-    button.actor.emit(&ButtonEvent::Released);
-
-    let _ = &button.actor >> &log_button;
-    let _ = &button.actor >> &pressed_led_on >> &led.actor;
-
-    loop {
-        embassy_futures::select::select(button.run(), led.run()).await;
-    }
-}
+async fn test() {}
 
 // #[cortex_m_rt::entry]
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     heap_setup();
     hprintln!("main started");
-    logger_init().unwrap();
+    semi_logger_init().unwrap();
 
     let mut peripherals = hal::Peripherals::take().unwrap();
     let mut sysctl = peripherals.SYSCTL.constrain();
@@ -107,6 +81,10 @@ async fn main(spawner: Spawner) {
         &clocks,
         &sysctl.power_control,
     );
+    let (mut tx, mut rx) = uart.split();
+
+    let _x = serial_logger_init(Box::new(tx));
+    hprintln!("serial logger issue  {:?}", _x);
 
     let mut portf = peripherals.GPIO_PORTF.split(&sysctl.power_control);
 
@@ -140,10 +118,36 @@ async fn main(spawner: Spawner) {
         }
     });*/
 
-    let (mut tx, mut rx) = uart.split();
+    let mut button = Button::new();
+    let mut led = Led::new(pin_red);
+    let mut pressed_led_on = Mapper::new(|x| match x {
+        ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
+        ButtonEvent::Released => Some(LedCmd::Blink(100)),
+    });
+    let mut log_button = Sink::new(|x| match x {
+        ButtonEvent::Pressed => info!("log pressed"),
+        ButtonEvent::Released => info!("log released"),
+    });
+
+    /*let _z = &button.actor
+    >> &map(|x| match x {
+        ButtonEvent::Pressed => LedCmd::On,
+        ButtonEvent::Released => LedCmd::Off,
+    })
+    >> &led.actor; */
+
+    button.actor.emit(&ButtonEvent::Pressed);
+    button.actor.emit(&ButtonEvent::Released);
+
+    let _ = &button.actor >> &log_button;
+    let _ = &button.actor >> &pressed_led_on >> &led.actor;
     info!("main loop started");
+    loop {
+        embassy_futures::select::select(button.run(), led.run()).await;
+    }
 }
 
+//use alloc::fmt::format;
 
 #[exception]
 unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
@@ -153,6 +157,9 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
 
 // HEAP allocation for embedded
 use embedded_alloc::Heap;
+use void::Void;
+
+use crate::serial_logger::serial_logger_init;
 
 #[global_allocator]
 static ALLOCATOR: Heap = Heap::empty();

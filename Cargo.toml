@@ -47,6 +47,7 @@ mini-io-queue = {  version = "0.2.0", default-features = false, features = ["asy
 # thingbuf ={ version = "0.1.4", default-features = false, features = ["alloc"] }
 # stakker = { version = "0.2.10", default-features = false, features = ["spin_no_std"] }
 log="*"
+lazy_static={ version ="*",default-features = false, features = ["spin_no_std"] }
 
 [dependencies.linked_list_allocator]
 default-features = false

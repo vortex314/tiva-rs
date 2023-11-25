@@ -1,11 +1,13 @@
 use crate::limero::*;
+use alloc::boxed::Box;
 use alloc::rc::Rc;
+use embedded_hal::digital::OutputPin;
+
 use core::cell::RefCell;
 use embassy_time::Duration;
 use embassy_time::Timer;
 //use embassy_futures::join::join;
 use embassy_futures::select::select;
-use log::info;
 
 #[derive(Debug, Clone, Default)]
 pub enum LedCmd {
@@ -18,14 +20,16 @@ pub struct Led {
     pub actor: Actor<LedCmd, NoEvent>,
     state: Rc<RefCell<bool>>,
     interval_ms: Rc<RefCell<u64>>,
+    pin : Box<dyn OutputPin>,
 }
 
 impl Led {
-    pub fn new() -> Self {
+    pub fn new(pin:impl OutputPin +'static) -> Self {
         Led {
             state: Rc::new(RefCell::new(false)),
             actor: Actor::new(10),
             interval_ms: Rc::new(RefCell::new(100)),
+            pin:Box::new(pin)
         }
     }
     pub async fn run(&mut self) {
@@ -33,17 +37,17 @@ impl Led {
             async {
                 loop {
                     let interval = Duration::from_millis(*self.interval_ms.borrow());
-                    info!("blinking interval {}", interval.as_millis());
                     Timer::after(interval).await;
+                    self.pin.set_high();
                     self.state.replace(true);
                     Timer::after(interval).await;
+                    self.pin.set_low();
                     self.state.replace(false);
                 }
             },
             async {
                 loop {
                     let cmd = self.actor.recv().await;
-                    info!("received event {:?}", cmd);
                     match cmd {
                         LedCmd::On => {
                             self.state.replace(true);
@@ -61,9 +65,4 @@ impl Led {
         .await;
     }
 }
-/*
-impl Listener<LedCmd> for Led {
-    fn on(&self, value: &LedCmd) {
-        self.actor.on(value);
-    }
-}*/
+
