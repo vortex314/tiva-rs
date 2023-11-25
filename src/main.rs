@@ -25,7 +25,7 @@ use tm4c123x_hal::gpio::GpioExt;
 use tm4c123x_hal::sysctl::SysctlExt;
 use tm4c123x_hal::{self as hal, prelude::*};
 
-use log::info;
+use log::{info, Level};
 use panic_semihosting as _;
 
 mod limero;
@@ -39,18 +39,25 @@ mod semi_logger;
 use semi_logger::*;
 mod timer_driver;
 use timer_driver::Clock;
+mod echo;
+use echo::*;
 
 mod serial_logger;
+
+use embassy_executor::Executor;
 // use serial_logger::serial_logger_init;
 
-async fn test() {}
-
-// #[cortex_m_rt::entry]
+#[embassy_executor::task]
+async fn test_task() {
+    let mut echo = Echo::new(1000000);
+   let _ = &echo.actor >> &echo.actor;
+   echo.run().await;
+}
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     heap_setup();
     hprintln!("main started");
-    semi_logger_init().unwrap();
+ //   semi_logger_init().unwrap();
 
     let mut peripherals = hal::Peripherals::take().unwrap();
     let mut sysctl = peripherals.SYSCTL.constrain();
@@ -68,7 +75,6 @@ async fn main(spawner: Spawner) {
         .into_af_push_pull::<hal::gpio::AF1>(&mut porta_parts.control);
     let rx_pin = porta_parts.pa0.into_af_push_pull(&mut porta_parts.control);
 
-    test().await;
 
     let uart = hal::serial::Serial::uart0(
         peripherals.UART0,
@@ -82,9 +88,10 @@ async fn main(spawner: Spawner) {
         &sysctl.power_control,
     );
     let (mut tx, mut rx) = uart.split();
+    hprintln!("switching to serial logger");
+    let _x = SerialLogger::init(Level::Info,Box::new(tx));
+    let _r = spawner.spawn(test_task());
 
-    let _x = serial_logger_init(Box::new(tx));
-    hprintln!("serial logger issue  {:?}", _x);
 
     let mut portf = peripherals.GPIO_PORTF.split(&sysctl.power_control);
 
@@ -117,27 +124,16 @@ async fn main(spawner: Spawner) {
             }
         }
     });*/
-
     let mut button = Button::new();
     let mut led = Led::new(pin_red);
     let mut pressed_led_on = Mapper::new(|x| match x {
         ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
-        ButtonEvent::Released => Some(LedCmd::Blink(100)),
+        ButtonEvent::Released => Some(LedCmd::Blink(50)),
     });
     let mut log_button = Sink::new(|x| match x {
         ButtonEvent::Pressed => info!("log pressed"),
         ButtonEvent::Released => info!("log released"),
     });
-
-    /*let _z = &button.actor
-    >> &map(|x| match x {
-        ButtonEvent::Pressed => LedCmd::On,
-        ButtonEvent::Released => LedCmd::Off,
-    })
-    >> &led.actor; */
-
-    button.actor.emit(&ButtonEvent::Pressed);
-    button.actor.emit(&ButtonEvent::Released);
 
     let _ = &button.actor >> &log_button;
     let _ = &button.actor >> &pressed_led_on >> &led.actor;
@@ -159,7 +155,7 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
 use embedded_alloc::Heap;
 use void::Void;
 
-use crate::serial_logger::serial_logger_init;
+use crate::serial_logger::*;
 
 #[global_allocator]
 static ALLOCATOR: Heap = Heap::empty();

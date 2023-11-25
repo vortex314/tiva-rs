@@ -8,6 +8,7 @@ use embassy_time::Duration;
 use embassy_time::Timer;
 //use embassy_futures::join::join;
 use embassy_futures::select::select;
+use log::info;
 
 #[derive(Debug, Clone, Default)]
 pub enum LedCmd {

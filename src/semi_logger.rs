@@ -8,7 +8,7 @@ use cortex_m_semihosting::hprintln;
 use crate::timer_driver::msec;
 use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
 
-struct SemiLogger;
+pub struct SemiLogger;
 
 pub static SEMI_LOGGER: SemiLogger = SemiLogger;
 

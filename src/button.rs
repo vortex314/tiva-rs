@@ -23,9 +23,9 @@ impl Button {
     }
     pub async fn run(&mut self) {
         loop {
-            Timer::after(Duration::from_millis(3000)).await;
+            Timer::after(Duration::from_millis(5000)).await;
             self.actor.emit(&ButtonEvent::Pressed);
-            Timer::after(Duration::from_millis(3000)).await;
+            Timer::after(Duration::from_millis(5000)).await;
             self.actor.emit(&ButtonEvent::Released);
         }
 
