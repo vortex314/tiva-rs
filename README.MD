@@ -92,4 +92,6 @@ Build with
 - (gdb) x/10x $pc - examine program counter
 - (gdb) info break - list breakpoints
 - (gdb) delete breakpoints - delete all breakpoints
-
+- (gdb) x/i $pc - examine instruction at program counter
+- (gdb) info functions - list all functions
+- (gdb) info variables - list all variables

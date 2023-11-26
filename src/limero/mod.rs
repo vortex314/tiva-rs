@@ -16,8 +16,8 @@ use {
 #[cfg(feature = "embassy")]
 use {alloc::boxed::Box, alloc::rc::Rc, alloc::vec::Vec, embassy_futures::block_on};
 
+use core::cell::RefCell;
 use core::ops::Shr;
-use core::{cell::RefCell};
 
 use log::warn;
 use mini_io_queue::asyncio;
@@ -162,7 +162,7 @@ pub struct Mapper<CMD, EVENT> {
     listeners: Rc<RefCell<Vec<Box<dyn Listener<EVENT>>>>>,
 }
 
-impl<CMD,EVENT> Clone for Mapper<CMD, EVENT> {
+impl<CMD, EVENT> Clone for Mapper<CMD, EVENT> {
     fn clone(&self) -> Self {
         Mapper {
             func: self.func,
@@ -285,3 +285,17 @@ where
         rhs
     }
 }
+
+/* 
+fn filter<T>(value: &T) -> Mapper<T, T>
+where
+    T: Clone + Default + 'static,
+{
+    Mapper::new(|v| {
+        if v == value {
+            Some(v.clone())
+        } else {
+            None
+        }
+    })
+}*/

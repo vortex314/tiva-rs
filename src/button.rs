@@ -9,6 +9,7 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use cortex_m_rt::exception;
 use embassy_sync::waitqueue::WakerRegistration;
+use embassy_time::with_timeout;
 use embedded_hal::can::Error;
 use embedded_hal::digital::v2::InputPin;
 use futures::Future;
@@ -35,6 +36,7 @@ struct ButtonState {
 }
 
 static BUTTON_WAKER: AtomicWaker = AtomicWaker::new();
+static mut BUTTON_STATE: Option<Box<dyn InputPin<Error = ()>>> = None;
 pub struct Button {
     pub actor: Actor<NoCmd, ButtonEvent>,
     state: Rc<RefCell<ButtonState>>,
@@ -42,6 +44,8 @@ pub struct Button {
 impl Button {
     pub fn new(pin: impl InputPin<Error=()> + 'static) -> Self {
         let reg = WakerRegistration::new();
+
+
         Button {
             actor: Actor::new(0), // no input queue neeeded
             state: Rc::new(RefCell::new(ButtonState {
@@ -51,7 +55,8 @@ impl Button {
         }
     }
     pub async fn run(&mut self) {
-        self.await;
+     //   with_timeout(Duration::from_secs(1), self.poll).await;
+        let _x = self.await;
 
         /*loop {
             Timer::after(Duration::from_millis(5000)).await;
@@ -90,6 +95,7 @@ impl futures::Future for Button {
 }
 
 // interrupt handler wake ButtonActor
+static mut GPIOF_INTERRUPTS: u32 = 1000;
 
 #[interrupt]
 fn GPIOF() {
@@ -97,9 +103,19 @@ fn GPIOF() {
     let mut portf = p.GPIO_PORTF.split(&p.SYSCTL.power_control);
     let mut switch1 = portf.pf4.into_pull_up_input();
     switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);*/
-
+// steal periheral
+    let p = unsafe { tm4c123x::Peripherals::steal() };
     hprintln!("GPIOF");
-    BUTTON_WAKER.wake();
+    unsafe {
+        GPIOF_INTERRUPTS += 1;
+    }
+    // clear interrupt
+        let mut portf = p.GPIO_PORTF.split(&p.SYSCTL.power_control);
+        let mut switch1 = portf.pf4.into_pull_up_input();
+        switch1.clear_interrupt_pending_bit();
+        switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);
+
+//    BUTTON_WAKER.wake();
     //  button_actor.receptor.emit(&ButtonEvent::Pressed);
 }
 

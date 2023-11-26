@@ -14,7 +14,12 @@ extern crate alloc;
 
 
 use alloc::boxed::Box;
+use cortex_m::interrupt;
 use cortex_m_rt::exception;
+use cortex_m::interrupt::enable;
+use cortex_m::peripheral::{NVIC, nvic};
+
+use tm4c123x::Interrupt;
 use tm4c_hal::{gpio, serial};
 
 use cortex_m_rt::ExceptionFrame;
@@ -101,6 +106,9 @@ async fn main(spawner: Spawner) {
     let mut switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
     let mut switch1 = portf.pf4.into_pull_up_input();
     switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);
+    let mut reg = portf.control;
+    unsafe { enable(); };
+    unsafe { NVIC::unmask(Interrupt::GPIOF); };
     switch2.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);
     info!(" switch1 interrupt status : {}",switch1.get_interrupt_status());
 
@@ -152,6 +160,20 @@ async fn main(spawner: Spawner) {
         ButtonEvent::Pressed => Some(LedCmd::On),
         ButtonEvent::Released => Some(LedCmd::Off),
     });
+// &mqtt.actor >> Mapper::new( |event| match event { Message("led_interval",x) => Some(LedCmd::Blink(x))} ) >> &led.actor; ));
+// let led_actor = ActorRef::<LedCmd,NoEvent>::new(led);
+// impl Actor for Led {
+//     type Cmd = LedCmd;
+//     type Event = NoEvent;
+//     fn on(&mut self, cmd: &LedCmd) -> Option<NoEvent> {
+//         match cmd {
+//             LedCmd::On => {
+//                 self.pin.set_high();
+//                 Some(NoEvent)
+//             }
+
+
+    unsafe { cortex_m::interrupt::enable(); };
 
     let _ = &button.actor >> &log_button;
     let _ = &button2.actor >> &log_button2;
