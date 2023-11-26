@@ -96,6 +96,8 @@ async fn main(spawner: Spawner) {
     let mut portf = peripherals.GPIO_PORTF.split(&sysctl.power_control);
 
     let mut pin_red = portf.pf1.into_push_pull_output();
+    let mut pin_blue = portf.pf2.into_push_pull_output();
+    let mut pin_green = portf.pf3.into_push_pull_output();
     let mut switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
     let mut switch1 = portf.pf4.into_pull_up_input();
     switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);
@@ -128,7 +130,10 @@ async fn main(spawner: Spawner) {
     let mut button = Button::new(switch1);
     let mut button2 = Button::new(switch2);
 
-    let mut led = Led::new(pin_red);
+    let mut led_red = Led::new(pin_red);
+    let mut led_blue = Led::new(pin_blue);
+    let mut led_green = Led::new(pin_green);
+
     let mut pressed_led_on = Mapper::new(|x| match x {
         ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
         ButtonEvent::Released => Some(LedCmd::Blink(50)),
@@ -143,12 +148,18 @@ async fn main(spawner: Spawner) {
         ButtonEvent::Released => info!("button2 released"),
     });
 
+    let mut pressed2_led_on = Mapper::new(|x| match x {
+        ButtonEvent::Pressed => Some(LedCmd::On),
+        ButtonEvent::Released => Some(LedCmd::Off),
+    });
+
     let _ = &button.actor >> &log_button;
     let _ = &button2.actor >> &log_button2;
-    let _ = &button.actor >> &pressed_led_on >> &led.actor;
+    let _ = &button2.actor >> &pressed2_led_on >> &led_green.actor;
+    let _ = &button.actor >> &pressed_led_on >> &led_red.actor;
     info!("main loop started");
     loop {
-        embassy_futures::select::select3(button.run(), led.run(),button2.run()).await;
+        embassy_futures::select::select4(button.run(), led_red.run(),button2.run(),led_green.run()).await;
     }
 }
 

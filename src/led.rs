@@ -19,51 +19,51 @@ pub enum LedCmd {
 }
 pub struct Led {
     pub actor: Actor<LedCmd, NoEvent>,
-    state: Rc<RefCell<bool>>,
+    state: Rc<RefCell<LedCmd>>,
     interval_ms: Rc<RefCell<u64>>,
-    pin : Box<dyn OutputPin>,
+    pin: Box<dyn OutputPin>,
 }
 
 impl Led {
-    pub fn new(pin:impl OutputPin +'static) -> Self {
+    pub fn new(pin: impl OutputPin + 'static) -> Self {
         Led {
-            state: Rc::new(RefCell::new(false)),
+            state: Rc::new(RefCell::new(LedCmd::Off)),
             actor: Actor::new(10),
             interval_ms: Rc::new(RefCell::new(100)),
-            pin:Box::new(pin)
+            pin: Box::new(pin),
         }
     }
     pub async fn run(&mut self) {
         select(
             async {
                 loop {
-                    let interval = Duration::from_millis(*self.interval_ms.borrow());
-                    Timer::after(interval).await;
-                    self.pin.set_high();
-                    self.state.replace(true);
-                    Timer::after(interval).await;
-                    self.pin.set_low();
-                    self.state.replace(false);
+                    let state = self.state.borrow().clone();
+                    match state {
+                        LedCmd::On => {
+                            self.pin.set_high();
+                            Timer::after(Duration::from_millis(100)).await;
+                        }
+                        LedCmd::Off => {
+                            self.pin.set_low();
+                            Timer::after(Duration::from_millis(100)).await;
+                        }
+                        LedCmd::Blink(intv) => {
+                            let interval = Duration::from_millis(intv as u64);
+                            Timer::after(interval).await;
+                            self.pin.set_high();
+                            Timer::after(interval).await;
+                            self.pin.set_low();
+                        }
+                    }
                 }
             },
             async {
                 loop {
                     let cmd = self.actor.recv().await;
-                    match cmd {
-                        LedCmd::On => {
-                            self.state.replace(true);
-                        }
-                        LedCmd::Off => {
-                            self.state.replace(false);
-                        }
-                        LedCmd::Blink(t) => {
-                            self.interval_ms.replace(t as u64) ;
-                        }
-                    }
+                    self.state.replace(cmd);
                 }
             },
         )
         .await;
     }
 }
-
