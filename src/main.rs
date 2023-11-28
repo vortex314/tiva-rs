@@ -17,6 +17,7 @@ use core::default;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
+use alloc::borrow;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::{self, Vec};
@@ -25,6 +26,7 @@ use cortex_m::interrupt::enable;
 use cortex_m::peripheral::{nvic, NVIC};
 use cortex_m_rt::exception;
 
+use cortex_m_semihosting::nr::open::R;
 use embassy_sync::pubsub::publisher;
 use futures::Future;
 use tm4c123x::Interrupt;
@@ -41,7 +43,7 @@ use tm4c123x_hal::{self as hal, prelude::*};
 use log::{info, Level};
 use panic_semihosting as _;
 
-/*
+
 mod limero;
 use limero::*;
 
@@ -51,7 +53,7 @@ mod button;
 use button::*;
 
 mod echo;
-use echo::*;*/
+use echo::*;
 mod semi_logger;
 use semi_logger::*;
 mod timer_driver;
@@ -78,160 +80,7 @@ mqtt.tell(RouteReq("dst/+/object/prop",object_actor));
 mqtt >> filter(MqttMsg::Publish("dst/+/led/left",x))
 
 */
-use log::warn;
 
-use embassy_futures::block_on;
-use mini_io_queue::asyncio;
-use mini_io_queue::asyncio::queue;
-use mini_io_queue::storage::HeapBuffer;
-use nb::block;
-
-#[derive(Debug, Clone, Default)]
-pub enum NoEvent {
-    #[default]
-    Zero = 0,
-}
-#[derive(Debug, Clone, Default)]
-pub enum NoCmd {
-    #[default]
-    Zero = 0,
-}
-pub trait Listener<T> {
-    fn on(&self, value: &T);
-}
-trait Actor {
-    type Cmd ;
-    type Event ;
-    fn on(&mut self, cmd: &Self::Cmd, me: &mut ActorWrapper<Self::Cmd,Self::Event>);
-}
-
-struct ActorWrapper<CMD, EVENT> {
-    actor: Box<dyn Actor<Cmd=CMD, Event=EVENT>>,             // invoked on CMD
-    listeners: Vec<Box<dyn Listener<EVENT>>>,      // invoked on EVENT
-    cmds_reader: asyncio::Reader<HeapBuffer<CMD>>, // used by actor itself
-    cmds_writer: asyncio::Writer<HeapBuffer<CMD>>,
-}
-
-impl<CMD, EVENT> ActorWrapper<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    fn new(actor: Box<dyn Actor<Cmd=CMD, Event=EVENT>>, capacity: usize) -> ActorWrapper<CMD, EVENT> {
-        let (mut reader, mut writer) = queue(capacity);
-        ActorWrapper {
-            actor,
-            listeners: Vec::new(),
-            cmds_reader: reader,
-            cmds_writer: writer,
-        }
-    }
-    async fn recv(&mut self) -> CMD {
-        let mut cmd = [CMD::default()];
-        self.cmds_reader.read(&mut cmd).await;
-        cmd[0].clone()
-    }
-    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) -> usize {
-        self.listeners.push(listener);
-        self.listeners.len() - 1
-    }
-    fn remove_listener(&mut self, listener_id: usize) {
-        self.listeners.remove(listener_id);
-    }
-    fn emit(&self, value: &EVENT) {
-        for listener in self.listeners.iter() {
-            listener.on(value);
-        }
-    }
-    fn on(&mut self, cmd: &CMD) {
-        let buf = [cmd.clone()];
-        let res = block_on(self.cmds_writer.write(&buf));
-        if res == 0 {
-            warn!(" cannot write command ")
-        };
-    }
-}
-
-struct ActorRef<CMD, EVENT> {
-    actor_wrapper: Rc<RefCell<ActorWrapper<CMD, EVENT>>>,
-}
-
-impl<CMD, EVENT> ActorRef<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    fn new(actor: Box<dyn Actor<Cmd=CMD, Event=EVENT>>, capacity: usize) -> ActorRef<CMD, EVENT> {
-        ActorRef {
-            actor_wrapper: Rc::new(RefCell::new(ActorWrapper::new(actor, capacity))),
-        }
-    }
-
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
-        self.actor_wrapper
-            .borrow_mut()
-            .add_listener(listener)
-    }
-
-    fn on(&self, cmd: &CMD) {
-        self.actor_wrapper.borrow_mut().on(cmd);
-    }
-
-    async fn run(&self) {
-        loop {
-            let mut buf = [CMD::default(); 1];
-            let cmd = self.actor_wrapper.borrow_mut().recv().await;
-            self.actor_wrapper
-                .borrow_mut()
-                .actor
-                .on(&buf[0], &mut self.actor_wrapper.borrow_mut());
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-
-enum MyActorCmd {
-    #[default]
-    Connect,
-    Disconnect,
-}
-
-struct MyActor {
-    last_cmd : MyActorCmd
-}
-
-impl Actor for MyActor {
-    type Cmd = MyActorCmd;
-    type Event = NoEvent;
-    fn on(&mut self, cmd: &MyActorCmd, wrapper: &mut ActorWrapper<MyActorCmd, NoEvent>) {
-        match cmd {
-            MyActorCmd::Connect => {
-                info!("connect");
-                self.last_cmd = cmd.clone();
-                wrapper.emit(&NoEvent::Zero);
-            }
-            MyActorCmd::Disconnect => {
-                info!("disconnect");
-                wrapper.emit(&NoEvent::Zero);
-            }
-        }
-    }
-}
-
-async fn tst() {
-    let led = ActorRef::new(Box::new(MyActor{last_cmd:MyActorCmd::default()}), 10);
-    led.on(&MyActorCmd::Connect);
-    let _ = led.run().await;
-}
-
-impl<CMD, EVENT> Clone for ActorRef<CMD, EVENT> {
-    fn clone(&self) -> Self {
-        ActorRef {
-            actor_wrapper: Rc::clone(&self.actor_wrapper),
-        }
-    }
-}
 
 /*#[embassy_executor::task]
 async fn test_task() {
@@ -243,8 +92,7 @@ async fn test_task() {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     heap_setup();
-    tst().await;
-    tst().await;
+
     hprintln!("main started");
     //   semi_logger_init().unwrap();
 
@@ -301,7 +149,7 @@ async fn main(spawner: Spawner) {
         switch1.get_interrupt_status()
     );
 
-    /*    let mut pin_blue = portf.pf2.into_push_pull_output();
+    /*let mut pin_blue = portf.pf2.into_push_pull_output();
     let mut pin_green = portf.pf3.into_push_pull_output();
 
     let porte = peripherals.GPIO_PORTE.split(&sysctl.power_control);
@@ -324,12 +172,12 @@ async fn main(spawner: Spawner) {
             }
         }
     });*/
-    /*  let mut button = Button::new(switch1);
-    let mut button2 = Button::new(switch2);
+    let mut button = ActorRef::new(Box::new(Button::new(switch1)),2);
+    let mut button2 = ActorRef::new(Box::new(Button::new(switch2)),2);
 
-    let mut led_red = Led::new(pin_red);
-    let mut led_blue = Led::new(pin_blue);
-    let mut led_green = Led::new(pin_green);
+    let mut led_red = ActorRef::new(Box::new(Led::new(pin_red)),3);
+    let mut led_blue = ActorRef::new(Box::new(Led::new(pin_blue)),3);
+    let mut led_green = ActorRef::new(Box::new(Led::new(pin_green)),3);
 
     let mut pressed_led_on = Mapper::new(|x| match x {
         ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
@@ -365,10 +213,13 @@ async fn main(spawner: Spawner) {
         cortex_m::interrupt::enable();
     };
 
-    let _ = &button.actor >> &log_button;
-    let _ = &button2.actor >> &log_button2;
-    let _ = &button2.actor >> &pressed2_led_on >> &led_green.actor;
-    let _ = &button.actor >> &pressed_led_on >> &led_red.actor;
+    button.on(&ButtonCmd::Init);
+    led_red.on(&LedCmd::Blink(1000));
+
+    let _ = &button >> &log_button;
+    let _ = &button2 >> &log_button2;
+    let _ = &button2 >> &pressed2_led_on >> &led_green;
+    let _ = &button >> &pressed_led_on >> &led_red;
     info!("main loop started");
     loop {
         embassy_futures::select::select4(
@@ -378,7 +229,7 @@ async fn main(spawner: Spawner) {
             led_green.run(),
         )
         .await;
-    }*/
+    }
 }
 
 //use alloc::fmt::format;

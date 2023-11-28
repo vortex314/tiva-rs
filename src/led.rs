@@ -1,6 +1,7 @@
 use crate::limero::*;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use embassy_time::Instant;
 use embedded_hal::digital::OutputPin;
 
 use core::cell::RefCell;
@@ -16,54 +17,70 @@ pub enum LedCmd {
     On,
     Off,
     Blink(u32),
+    TimerBlink,
+    Init,
 }
 pub struct Led {
-    pub actor: Actor<LedCmd, NoEvent>,
-    state: Rc<RefCell<LedCmd>>,
-    interval_ms: Rc<RefCell<u64>>,
+    state: LedCmd,
+    interval_ms: u64,
     pin: Box<dyn OutputPin>,
+    pin_high: bool,
 }
 
 impl Led {
     pub fn new(pin: impl OutputPin + 'static) -> Self {
         Led {
-            state: Rc::new(RefCell::new(LedCmd::Off)),
-            actor: Actor::new(10),
-            interval_ms: Rc::new(RefCell::new(100)),
+            state: LedCmd::On,
+            interval_ms: 100,
             pin: Box::new(pin),
+            pin_high: false,
         }
     }
-    pub async fn run(&mut self) {
-        select(
-            async {
-                loop {
-                    let state = self.state.borrow().clone();
-                    match state {
-                        LedCmd::On => {
-                            self.pin.set_high();
-                            Timer::after(Duration::from_millis(100)).await;
-                        }
-                        LedCmd::Off => {
-                            self.pin.set_low();
-                            Timer::after(Duration::from_millis(100)).await;
-                        }
-                        LedCmd::Blink(intv) => {
-                            let interval = Duration::from_millis(intv as u64);
-                            Timer::after(interval).await;
-                            self.pin.set_high();
-                            Timer::after(interval).await;
-                            self.pin.set_low();
-                        }
+}
+
+impl Actor<LedCmd, NoEvent> for Led {
+    fn init(&mut self, wrapper: &mut ActorWrapper<LedCmd, NoEvent>) {
+        info!("Led init");
+        wrapper.set_alarm(
+            LedCmd::TimerBlink,
+            Instant::now() + Duration::from_millis(1000),
+        );
+        self.pin.set_high();
+        self.pin_high = true;
+    }
+    fn on(&mut self, cmd: &LedCmd, _me: &mut ActorWrapper<LedCmd, NoEvent>) {
+        info!("Led cmd {:?}", cmd);
+        match cmd {
+            LedCmd::Init => {
+                self.pin.set_high();
+                self.pin_high = true;
+            }
+            LedCmd::On => {
+                self.pin.set_high();
+                self.pin_high = true;
+            }
+            LedCmd::Off => {
+                self.pin.set_low();
+                self.pin_high = false;
+            }
+            LedCmd::Blink(intv) => {
+                _me.set_alarm(
+                    LedCmd::TimerBlink,
+                    Instant::now() + Duration::from_millis(*intv as u64),
+                );
+                self.interval_ms = *intv as u64;
+            }
+            LedCmd::TimerBlink => {
+                if let LedCmd::Blink(x) = self.state {
+                    if self.pin_high {
+                        self.pin.set_low();
+                        self.pin_high = false;
+                    } else {
+                        self.pin.set_high();
+                        self.pin_high = true;
                     }
                 }
-            },
-            async {
-                loop {
-                    let cmd = self.actor.recv().await;
-                    self.state.replace(cmd);
-                }
-            },
-        )
-        .await;
+            }
+        }
     }
 }

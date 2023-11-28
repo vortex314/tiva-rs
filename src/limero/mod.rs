@@ -19,33 +19,15 @@ use {alloc::boxed::Box, alloc::rc::Rc, alloc::vec::Vec, embassy_futures::block_o
 use core::cell::RefCell;
 use core::ops::Shr;
 
-use log::warn;
+use embassy_futures::select::*;
+use embassy_time::{with_timeout, Duration, Instant, TimeoutError, Timer};
+use log::{warn, info};
 use mini_io_queue::asyncio;
 use mini_io_queue::asyncio::queue;
 use mini_io_queue::storage::HeapBuffer;
 
-pub trait Listener<T> {
-    fn on(&self, value: &T);
-}
-pub trait Publisher<T> {
-    fn add_listener(&self, listener: Box<dyn Listener<T>>) -> usize;
-    fn remove_listener(&self, listener_id: usize);
-    fn emit(&self, value: &T);
-}
-pub struct Actor<CMD, EVENT> {
-    cmds_reader: Rc<RefCell<asyncio::Reader<HeapBuffer<CMD>>>>, // used by actor itself
-    cmds_writer: Rc<RefCell<asyncio::Writer<HeapBuffer<CMD>>>>, // used by external party talking to actor
-    listeners: Rc<RefCell<Vec<Box<dyn Listener<EVENT>>>>>,      // used by actor itself
-}
-impl<CMD, EVENT> Clone for Actor<CMD, EVENT> {
-    fn clone(&self) -> Self {
-        Actor {
-            cmds_reader: Rc::clone(&self.cmds_reader),
-            cmds_writer: Rc::clone(&self.cmds_writer),
-            listeners: Rc::clone(&self.listeners),
-        }
-    }
-}
+use nb::block;
+
 #[derive(Debug, Clone, Default)]
 pub enum NoEvent {
     #[default]
@@ -56,102 +38,267 @@ pub enum NoCmd {
     #[default]
     Zero = 0,
 }
-impl<CMD, EVENT> Actor<CMD, EVENT>
+pub trait Listener<T> {
+    fn on(&self, value: &T);
+}
+pub trait Publisher<T> {
+    fn add_listener(&self, listener: Box<dyn Listener<T>>) -> usize;
+    fn remove_listener(&self, listener_id: usize);
+    fn emit(&self, value: &T);
+}
+pub trait Actor<CMD, EVENT> {
+    fn init(&mut self, wrapper: &mut ActorWrapper<CMD, EVENT>);
+    fn on(&mut self, cmd: &CMD, me: &mut ActorWrapper<CMD, EVENT>);
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ClockEntry<CMD> {
+    expires_at: Instant,
+    interval: Duration,
+    cmd: CMD,
+    repeat: bool,
+}
+
+pub struct ActorWrapper<CMD, EVENT> {
+    listeners: Vec<Box<dyn Listener<EVENT>>>, // invoked on EVENT
+    cmds_reader: asyncio::Reader<HeapBuffer<CMD>>, // used by actor itself
+    cmds_writer: asyncio::Writer<HeapBuffer<CMD>>,
+    clock_entries: Vec<ClockEntry<CMD>>,
+    next_alarm: Option<ClockEntry<CMD>>,
+}
+
+impl<CMD, EVENT> ActorWrapper<CMD, EVENT>
 where
     CMD: Clone + Default,
     EVENT: Clone + Default,
 {
-    pub fn new(capacity: usize) -> Self {
+    fn new(capacity: usize) -> ActorWrapper<CMD, EVENT> {
         let (mut reader, mut writer) = queue(capacity);
-        Actor {
-            cmds_reader: Rc::new(RefCell::new(reader)),
-            cmds_writer: Rc::new(RefCell::new(writer)),
-            listeners: Rc::new(RefCell::new(Vec::new())),
+        ActorWrapper {
+            listeners: Vec::new(),
+            cmds_reader: reader,
+            cmds_writer: writer,
+            clock_entries: Vec::new(),
+            next_alarm: None,
         }
     }
-    pub async fn recv(&self) -> CMD {
+    async fn recv(&mut self) -> CMD {
         let mut cmd = [CMD::default()];
-        self.cmds_reader.borrow_mut().read(&mut cmd).await;
+        self.cmds_reader.read(&mut cmd).await;
         cmd[0].clone()
     }
-}
-
-impl<CMD, EVENT> Listener<CMD> for Actor<CMD, EVENT>
-where
-    CMD: Clone + Default,
-{
-    fn on(&self, cmd: &CMD) {
-        if self.cmds_writer.borrow().has_space() {
-            let buf = [cmd.clone()];
-            let fut = async {
-                if self.cmds_writer.borrow_mut().write(&[cmd.clone()]).await != 1 {
-                    warn!("no reader ");
-                }
-            };
-            #[cfg(feature = "tokio")]
-            block_in_place(|| {
-                futures::executor::block_on(fut);
-            });
-            #[cfg(feature = "embassy")]
-            block_on(fut);
-        } else {
-            warn!("no space in actor queue");
-        }
+    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) -> usize {
+        self.listeners.push(listener);
+        self.listeners.len() - 1
     }
-}
-
-impl<EVENT, CMD> Publisher<EVENT> for Actor<CMD, EVENT>
-where
-    EVENT: Clone,
-{
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
-        self.listeners.borrow_mut().push(listener);
-        self.listeners.borrow().len() - 1
+    fn remove_listener(&mut self, listener_id: usize) {
+        self.listeners.remove(listener_id);
     }
-    fn remove_listener(&self, listener_id: usize) {
-        self.listeners.borrow_mut().remove(listener_id);
-    }
-    fn emit(&self, value: &EVENT) {
-        for listener in self.listeners.borrow().iter() {
+    pub fn emit(&self, value: &EVENT) {
+        for listener in self.listeners.iter() {
             listener.on(value);
         }
     }
-}
-pub struct Flow<EVENT, CMD> {
-    pub actor: Actor<EVENT, CMD>,
-    func: fn(&EVENT) -> CMD,
-}
-impl<EVENT, CMD> Flow<EVENT, CMD>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    pub fn new(func: fn(&EVENT) -> CMD) -> Self {
-        Flow {
-            actor: Actor::new(5),
-            func,
+    fn on(&mut self, cmd: &CMD) {
+        let buf = [cmd.clone()];
+        let res = block_on(self.cmds_writer.write(&buf));
+        if res == 0 {
+            warn!(" cannot write command ")
+        };
+    }
+    fn has_space(&self) -> bool {
+        self.cmds_writer.has_space()
+    }
+    // set timer to send cmd after delay
+    pub fn set_alarm(&mut self, cmd: CMD, clock: Instant) {
+        info!("set_alarm {} ", clock.as_millis());
+        self.clock_entries.push(ClockEntry {
+            expires_at: clock,
+            cmd,
+            interval: Duration::from_millis(10),
+            repeat: false,
+        });
+        self.next_alarm = self.next_alarm();
+    }
+
+    pub fn set_interval(&mut self, cmd: CMD, clock: Instant, interval: Duration) {
+        self.clock_entries.push(ClockEntry {
+            expires_at: clock,
+            interval,
+            cmd,
+            repeat: true,
+        });
+        self.next_alarm = self.next_alarm();
+    }
+
+    fn next_alarm(&self) -> Option<ClockEntry<CMD>> {
+        let mut min = Instant::now() + Duration::from_millis(1000000);
+        let mut clock_entry: Option<ClockEntry<CMD>> = None;
+        for entry in self.clock_entries.iter() {
+            if entry.expires_at <= min {
+                min = entry.expires_at;
+                clock_entry = Some(entry.clone());
+            }
+        }
+        clock_entry
+    }
+
+    fn handle_timeout(&mut self, clock_entry: ClockEntry<CMD>) {
+        let mut i = 0;
+        while i < self.clock_entries.len() {
+            if self.clock_entries[i].expires_at <= clock_entry.expires_at {
+                let cmd = self.clock_entries[i].cmd.clone();
+                self.on(&cmd);
+                if self.clock_entries[i].repeat {
+                    let interval = self.clock_entries[i].interval;
+                    self.clock_entries[i].expires_at += interval;
+                } else {
+                    self.clock_entries.remove(i);
+                }
+            } else {
+                i += 1;
+            }
         }
     }
-    pub async fn run(&mut self) {
-        loop {
-            let event = self.actor.recv().await;
-            let cmd = (self.func)(&event);
-            self.actor.emit(&cmd);
+    // find next alarm entry
+    // if clock is in the past, send cmd and remove entry
+    // if clock is in the future, wait for clock and repeat
+    // if no entry, wait forever
+    async fn process_message(&mut self) {
+        let cmd = self.recv().await;
+        self.on(&cmd);
+    }
+    async fn run(&mut self) {
+        let mut buf = [CMD::default(); 1];
+        let next_alarm = self.next_alarm();
+        match next_alarm {
+            Some(clock_entry) => {
+                info!("next alarm in {} ms", clock_entry.expires_at.as_millis());
+                let timeout = clock_entry.expires_at - Instant::now();
+                let res = with_timeout(timeout, self.process_message()).await;
+                match res {
+                    Err(TimeoutError) => {
+                        self.handle_timeout(clock_entry);
+                    }
+                    Ok(()) => {}
+                }
+            }
+            None => {
+                info!("no alarm");
+                self.process_message().await;
+            }
         }
     }
 }
 
-impl<'a, T, U, V> Shr<&'a Actor<U, V>> for &'a Actor<T, U>
+pub struct ActorRef<CMD, EVENT> {
+    actor: Rc<RefCell<Box<dyn Actor<CMD, EVENT>>>>,
+    actor_wrapper: Rc<RefCell<ActorWrapper<CMD, EVENT>>>,
+}
+
+impl<CMD, EVENT> ActorRef<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    pub fn new(actor: Box<dyn Actor<CMD, EVENT>>, capacity: usize) -> ActorRef<CMD, EVENT> {
+        let r = ActorRef {
+            actor: Rc::new(RefCell::new(actor)),
+            actor_wrapper: Rc::new(RefCell::new(ActorWrapper::new(capacity))),
+        };
+        r.actor.borrow_mut().init(&mut r.actor_wrapper.borrow_mut());
+        r
+    }
+
+    fn on(&self, cmd: &CMD) {
+        self.actor_wrapper.borrow_mut().on(cmd);
+    }
+
+    pub async fn run(&self) {
+        self.actor_wrapper.borrow_mut().run().await;
+    }
+}
+
+impl<CMD, EVENT> Listener<CMD> for ActorRef<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    fn on(&self, value: &CMD) {
+        self.on(value);
+    }
+}
+
+impl<CMD, EVENT> Publisher<EVENT> for ActorRef<CMD, EVENT>
+where
+    CMD: Clone + Default,
+    EVENT: Clone + Default,
+{
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
+        self.actor_wrapper.borrow_mut().add_listener(listener)
+    }
+
+    fn remove_listener(&self, listener_id: usize) {}
+    fn emit(&self, value: &EVENT) {
+        self.actor_wrapper.borrow().emit(value);
+    }
+}
+
+impl<'a, T, U, V> Shr<&'a ActorRef<U, V>> for &'a ActorRef<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,
     V: Clone + Default + 'static,
 {
-    type Output = &'a Actor<U, V>;
+    type Output = &'a ActorRef<U, V>;
 
-    fn shr(self, rhs: &'a Actor<U, V>) -> Self::Output {
+    fn shr(self, rhs: &'a ActorRef<U, V>) -> Self::Output {
         self.add_listener(Box::new(rhs.clone()));
         rhs
+    }
+}
+/*
+#[derive(Debug, Clone, Default)]
+enum MyActorCmd {
+    #[default]
+    Connect,
+    Disconnect,
+}
+
+struct MyActor {
+    last_cmd : MyActorCmd
+}
+
+impl Actor<MyActorCmd,NoEvent> for MyActor {
+
+    fn on(&mut self, cmd: &MyActorCmd, wrapper: &mut ActorWrapper<MyActorCmd, NoEvent>) {
+        match *cmd {
+            MyActorCmd::Connect => {
+                info!("connect");
+                self.last_cmd = cmd.clone();
+                wrapper.emit(&NoEvent::Zero);
+            }
+            MyActorCmd::Disconnect => {
+                info!("disconnect");
+                wrapper.emit(&NoEvent::Zero);
+            }
+        }
+    }
+}
+
+async fn tst() {
+    let led_raw = MyActor{last_cmd:MyActorCmd::default()};
+    let led = ActorRef::new(Box::new(led_raw), 10);
+    led.on(&MyActorCmd::Connect);
+    let _ = led.run().await;
+}
+*/
+impl<CMD, EVENT> Clone for ActorRef<CMD, EVENT> {
+    fn clone(&self) -> Self {
+        ActorRef {
+            actor_wrapper: Rc::clone(&self.actor_wrapper),
+            actor: Rc::clone(&self.actor),
+        }
     }
 }
 
@@ -214,7 +361,7 @@ where
 }
 //======================  Actor >> Handler >> ... ======================
 
-impl<'a, T, U, V> Shr<&'a Mapper<U, V>> for &'a Actor<T, U>
+impl<'a, T, U, V> Shr<&'a Mapper<U, V>> for &'a ActorRef<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,
@@ -229,15 +376,15 @@ where
 }
 //======================  Handler >> Actor >> ... ======================
 
-impl<'a, T, U, V> Shr<&'a Actor<U, V>> for &'a Mapper<T, U>
+impl<'a, T, U, V> Shr<&'a ActorRef<U, V>> for &'a Mapper<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,
     V: Clone + Default + 'static,
 {
-    type Output = &'a Actor<U, V>;
+    type Output = &'a ActorRef<U, V>;
 
-    fn shr(self, rhs: &'a Actor<U, V>) -> Self::Output {
+    fn shr(self, rhs: &'a ActorRef<U, V>) -> Self::Output {
         self.add_listener(Box::new(rhs.clone()));
         rhs
     }
@@ -273,7 +420,7 @@ where
 
 //======================  Actor >> Sink ======================
 
-impl<'a, T, U> Shr<&'a Sink<U>> for &'a Actor<T, U>
+impl<'a, T, U> Shr<&'a Sink<U>> for &'a ActorRef<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,
@@ -286,7 +433,7 @@ where
     }
 }
 
-/* 
+/*
 fn filter<T>(value: &T) -> Mapper<T, T>
 where
     T: Clone + Default + 'static,
