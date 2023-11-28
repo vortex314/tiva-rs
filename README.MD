@@ -2,7 +2,16 @@
 
 This is a simple  project for the [Stellaris Launchpad](http://www.ti.com/tool/ek-lm4f120xl) using [Rust](http://www.rust-lang.org/).
 <p>[tm4c123x-hal](https://github.com/rust-embedded-community/tm4c-hal) is used to access the hardware.
-
+## Requirements for an embedded actor model
+- async/await and timers
+- usable on std and no_std
+- actors shouldn't be aware of each other existance
+- wiring happens outside actor
+- actors should be able to be used in a non-embedded environment
+- actors should be able to be used in a multi-threaded environment
+- fast and efficient use of cpu resources
+- suport buffering of messages
+- actor should be internally handling, one message at a time
 ## Requirements
 - communicate via serial to serial2redis
 - serial protocol is JSON or CBOR 

@@ -13,6 +13,8 @@ use embassy_time::with_timeout;
 use embedded_hal::can::Error;
 use embedded_hal::digital::v2::InputPin;
 use futures::Future;
+use tm4c123x_hal::gpio::GpioExt;
+use tm4c123x_hal::sysctl::SysctlExt;
 use void::Void;
 
 use crate::limero::*;
@@ -105,17 +107,15 @@ fn GPIOF() {
     switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);*/
 // steal periheral
     let p = unsafe { tm4c123x::Peripherals::steal() };
-    hprintln!("GPIOF");
+    let mut sysctl = p.SYSCTL.constrain();
+    let mut portf = p.GPIO_PORTF.split(&sysctl.power_control);
+    let mut switch1 = portf.pf4.into_pull_up_input();
+    switch1.clear_interrupt();
+    hprintln!("GPIOF interrupt");
     unsafe {
         GPIOF_INTERRUPTS += 1;
     }
-    // clear interrupt
-        let mut portf = p.GPIO_PORTF.split(&p.SYSCTL.power_control);
-        let mut switch1 = portf.pf4.into_pull_up_input();
-        switch1.clear_interrupt_pending_bit();
-        switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);
 
 //    BUTTON_WAKER.wake();
-    //  button_actor.receptor.emit(&ButtonEvent::Pressed);
 }
 

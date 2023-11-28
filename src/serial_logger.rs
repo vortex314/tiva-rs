@@ -6,6 +6,7 @@ use embedded_hal::serial::Write as SerialWrite;
 use log::{Level, Log, Metadata, Record};
 use tm4c123x_hal::prelude::_embedded_hal_serial_Write;
 use void::Void;
+use crate::timer_driver::Clock;
 use crate::timer_driver::msec;
 use crate::alloc::string::ToString;
 use nb::block;
