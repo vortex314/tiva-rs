@@ -18,7 +18,6 @@ pub enum LedCmd {
     Off,
     Blink(u32),
     TimerBlink,
-    Init,
 }
 pub struct Led {
     state: LedCmd,
@@ -41,20 +40,18 @@ impl Led {
 impl Actor<LedCmd, NoEvent> for Led {
     fn init(&mut self, wrapper: &mut ActorWrapper<LedCmd, NoEvent>) {
         info!("Led init");
-        wrapper.set_alarm(
+        wrapper.set_interval(
             LedCmd::TimerBlink,
-            Instant::now() + Duration::from_millis(1000),
+            Duration::from_millis(1000),
         );
         self.pin.set_high();
         self.pin_high = true;
+        self.state = LedCmd::On;
     }
     fn on(&mut self, cmd: &LedCmd, _me: &mut ActorWrapper<LedCmd, NoEvent>) {
         info!("Led cmd {:?}", cmd);
+        self.state = cmd.clone();
         match cmd {
-            LedCmd::Init => {
-                self.pin.set_high();
-                self.pin_high = true;
-            }
             LedCmd::On => {
                 self.pin.set_high();
                 self.pin_high = true;

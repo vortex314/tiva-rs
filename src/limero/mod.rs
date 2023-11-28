@@ -51,7 +51,7 @@ pub trait Actor<CMD, EVENT> {
     fn on(&mut self, cmd: &CMD, me: &mut ActorWrapper<CMD, EVENT>);
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq,Copy)]
 struct ClockEntry<CMD> {
     expires_at: Instant,
     interval: Duration,
@@ -121,9 +121,10 @@ where
         self.next_alarm = self.next_alarm();
     }
 
-    pub fn set_interval(&mut self, cmd: CMD, clock: Instant, interval: Duration) {
+    pub fn set_interval(&mut self, cmd: CMD, interval: Duration) {
+        info!("set_interval {} ", interval.as_millis());
         self.clock_entries.push(ClockEntry {
-            expires_at: clock,
+            expires_at: Instant::now() + interval,
             interval,
             cmd,
             repeat: true,
@@ -136,6 +137,7 @@ where
         let mut clock_entry: Option<ClockEntry<CMD>> = None;
         for entry in self.clock_entries.iter() {
             if entry.expires_at <= min {
+                info!("next_alarm [{}] {} ", self.clock_entries.len(),entry.expires_at.as_millis());
                 min = entry.expires_at;
                 clock_entry = Some(entry.clone());
             }
@@ -143,10 +145,10 @@ where
         clock_entry
     }
 
-    fn handle_timeout(&mut self, clock_entry: ClockEntry<CMD>) {
+    fn handle_timeout(&mut self) {
         let mut i = 0;
         while i < self.clock_entries.len() {
-            if self.clock_entries[i].expires_at <= clock_entry.expires_at {
+            if self.clock_entries[i].expires_at <= Instant::now() {
                 let cmd = self.clock_entries[i].cmd.clone();
                 self.on(&cmd);
                 if self.clock_entries[i].repeat {
@@ -159,6 +161,7 @@ where
                 i += 1;
             }
         }
+        self.next_alarm = self.next_alarm();
     }
     // find next alarm entry
     // if clock is in the past, send cmd and remove entry
@@ -170,15 +173,15 @@ where
     }
     async fn run(&mut self) {
         let mut buf = [CMD::default(); 1];
-        let next_alarm = self.next_alarm();
-        match next_alarm {
+        info!("ActorWrapper::run() next_alarm {}",self.next_alarm.is_some());
+        match &self.next_alarm {
             Some(clock_entry) => {
                 info!("next alarm in {} ms", clock_entry.expires_at.as_millis());
                 let timeout = clock_entry.expires_at - Instant::now();
                 let res = with_timeout(timeout, self.process_message()).await;
                 match res {
                     Err(TimeoutError) => {
-                        self.handle_timeout(clock_entry);
+                        self.handle_timeout();
                     }
                     Ok(()) => {}
                 }
