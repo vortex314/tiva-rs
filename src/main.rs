@@ -20,6 +20,7 @@ use core::task::{Context, Poll};
 use alloc::borrow;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::{self, Vec};
 use cortex_m::interrupt;
 use cortex_m::interrupt::enable;
@@ -59,6 +60,8 @@ use semi_logger::*;
 mod timer_driver;
 use timer_driver::Clock;
 mod serial_logger;
+mod topic_router;
+use topic_router::*;
 
 use embassy_executor::Executor;
 // use serial_logger::serial_logger_init;
@@ -179,6 +182,42 @@ async fn main(spawner: Spawner) {
     let mut led_blue = ActorRef::new(Box::new(Led::new(pin_blue)),3);
     let mut led_green = ActorRef::new(Box::new(Led::new(pin_green)),3);
 
+    // let mut mqtt = ActorRef::new(Box::new(Mqtt::new()),1);
+    // let mut topic_router = ActorRef::new(Box::new(TopicRouter::new()),1);
+    // mqtt >> map(|x| match x { MqttMsg::Publish(topic,msg) => Some(RouteReq(topic,msg)) } ) >> topic_router;
+#[derive(Clone,Default)]
+    enum Msg<'a> {
+        #[default]
+        Start,
+        Publish(&'a str, &'a str),
+    }
+
+    let msg = Msg::Publish("topic","aaaaa");
+
+    if let Msg::Publish("str", msg) = msg {
+        info!("subscribe {}",  msg);
+    }
+
+    Sink::new(|msg| match msg {
+        Msg::Publish("led_blue", msg) => {
+            led_blue.on(&LedCmd::On);
+        },
+        Msg::Publish("led_blue", msg) => {
+            led_red.on(&LedCmd::On);
+        },
+        _ => {}
+    });
+
+    let func = |msg| match msg {
+        Msg::Publish("led_blue", msg) => {
+            led_blue.on(&LedCmd::On);
+        },
+        Msg::Publish("led_blue", msg) => {
+            led_red.on(&LedCmd::On);
+        },
+        _ => {}
+    };
+    
     let mut pressed_led_on = Mapper::new(|x| match x {
         ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
         ButtonEvent::Released => Some(LedCmd::Blink(50)),
@@ -212,9 +251,6 @@ async fn main(spawner: Spawner) {
     unsafe {
         cortex_m::interrupt::enable();
     };
-
-    button.on(&ButtonCmd::Init);
-    led_red.on(&LedCmd::Blink(1000));
 
     let _ = &button >> &log_button;
     let _ = &button2 >> &log_button2;

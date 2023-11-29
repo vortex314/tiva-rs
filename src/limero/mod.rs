@@ -16,7 +16,7 @@ use {
 #[cfg(feature = "embassy")]
 use {alloc::boxed::Box, alloc::rc::Rc, alloc::vec::Vec, embassy_futures::block_on};
 
-use core::cell::RefCell;
+use core::{cell::RefCell, mem};
 use core::ops::Shr;
 
 use embassy_futures::select::*;
@@ -42,13 +42,19 @@ pub trait Listener<T> {
     fn on(&self, value: &T);
 }
 pub trait Publisher<T> {
-    fn add_listener(&self, listener: Box<dyn Listener<T>>) -> usize;
-    fn remove_listener(&self, listener_id: usize);
+    fn add_listener(&self, listener: Box<dyn Listener<T>>);
+    fn remove_listener(&self, listener_id:&Box<dyn Listener<T>>);
     fn emit(&self, value: &T);
 }
 pub trait Actor<CMD, EVENT> {
     fn init(&mut self, wrapper: &mut ActorWrapper<CMD, EVENT>);
     fn on(&mut self, cmd: &CMD, me: &mut ActorWrapper<CMD, EVENT>);
+}
+
+fn compare_box<T: ?Sized>(left: &Box<T>, right: &Box<T>) -> bool {
+    let left : *const T = left.as_ref();
+    let right : *const T = right.as_ref();
+    left == right
 }
 
 #[derive(Debug, Clone, PartialEq,Copy)]
@@ -87,12 +93,11 @@ where
         self.cmds_reader.read(&mut cmd).await;
         cmd[0].clone()
     }
-    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) -> usize {
+    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>)  {
         self.listeners.push(listener);
-        self.listeners.len() - 1
     }
-    fn remove_listener(&mut self, listener_id: usize) {
-        self.listeners.remove(listener_id);
+    fn remove_listener(&mut self, listener: &Box<dyn Listener<EVENT>>) {
+        self.listeners.retain(|x| compare_box(x,listener)==false);
     }
     pub fn emit(&self, value: &EVENT) {
         for listener in self.listeners.iter() {
@@ -101,8 +106,7 @@ where
     }
     fn on(&mut self, cmd: &CMD) {
         let buf = [cmd.clone()];
-        let res = block_on(self.cmds_writer.write(&buf));
-        if res == 0 {
+        if block_on(self.cmds_writer.write(&buf)) == 0 {
             warn!(" cannot write command ")
         };
     }
@@ -121,7 +125,7 @@ where
         self.next_alarm = self.next_alarm();
     }
 
-    pub fn set_interval(&mut self, cmd: CMD, interval: Duration) {
+    pub fn interval_timer(&mut self, cmd: CMD, interval: Duration) {
         info!("set_interval {} ", interval.as_millis());
         self.clock_entries.push(ClockEntry {
             expires_at: Instant::now() + interval,
@@ -129,6 +133,19 @@ where
             cmd,
             repeat: true,
         });
+        self.next_alarm = self.next_alarm();
+    }
+
+
+    pub fn cancel_timer(&mut self, cmd: CMD) {
+        let mut i = 0;
+        while i < self.clock_entries.len() {
+            if mem::discriminant(&self.clock_entries[i].cmd) == mem::discriminant(&cmd) {
+                self.clock_entries.remove(i);
+            } else {
+                i += 1;
+            }
+        }
         self.next_alarm = self.next_alarm();
     }
 
@@ -213,7 +230,7 @@ where
         r
     }
 
-    fn on(&self, cmd: &CMD) {
+    pub fn on(&self, cmd: &CMD) {
         self.actor_wrapper.borrow_mut().on(cmd);
     }
 
@@ -237,11 +254,13 @@ where
     CMD: Clone + Default,
     EVENT: Clone + Default,
 {
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
-        self.actor_wrapper.borrow_mut().add_listener(listener)
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>)  {
+        self.actor_wrapper.borrow_mut().add_listener(listener);
     }
 
-    fn remove_listener(&self, listener_id: usize) {}
+    fn remove_listener(&self, listener: &Box<dyn Listener<EVENT>>) {
+        self.actor_wrapper.borrow_mut().remove_listener(listener);
+    }
     fn emit(&self, value: &EVENT) {
         self.actor_wrapper.borrow().emit(value);
     }
@@ -260,42 +279,7 @@ where
         rhs
     }
 }
-/*
-#[derive(Debug, Clone, Default)]
-enum MyActorCmd {
-    #[default]
-    Connect,
-    Disconnect,
-}
 
-struct MyActor {
-    last_cmd : MyActorCmd
-}
-
-impl Actor<MyActorCmd,NoEvent> for MyActor {
-
-    fn on(&mut self, cmd: &MyActorCmd, wrapper: &mut ActorWrapper<MyActorCmd, NoEvent>) {
-        match *cmd {
-            MyActorCmd::Connect => {
-                info!("connect");
-                self.last_cmd = cmd.clone();
-                wrapper.emit(&NoEvent::Zero);
-            }
-            MyActorCmd::Disconnect => {
-                info!("disconnect");
-                wrapper.emit(&NoEvent::Zero);
-            }
-        }
-    }
-}
-
-async fn tst() {
-    let led_raw = MyActor{last_cmd:MyActorCmd::default()};
-    let led = ActorRef::new(Box::new(led_raw), 10);
-    led.on(&MyActorCmd::Connect);
-    let _ = led.run().await;
-}
-*/
 impl<CMD, EVENT> Clone for ActorRef<CMD, EVENT> {
     fn clone(&self) -> Self {
         ActorRef {
@@ -349,12 +333,12 @@ where
     CMD: Clone + Default,
     EVENT: Clone + Default,
 {
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) -> usize {
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>)  {
         self.listeners.borrow_mut().push(listener);
-        self.listeners.borrow().len() - 1
     }
-    fn remove_listener(&self, listener_id: usize) {
-        self.listeners.borrow_mut().remove(listener_id);
+
+    fn remove_listener(&self, listener: &Box<dyn Listener<EVENT>>) {
+        self.listeners.borrow_mut().retain(|x| compare_box(x,listener)==false);
     }
     fn emit(&self, value: &EVENT) {
         for listener in self.listeners.borrow().iter() {

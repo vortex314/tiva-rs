@@ -40,7 +40,7 @@ impl Led {
 impl Actor<LedCmd, NoEvent> for Led {
     fn init(&mut self, wrapper: &mut ActorWrapper<LedCmd, NoEvent>) {
         info!("Led init");
-        wrapper.set_interval(
+        wrapper.interval_timer(
             LedCmd::TimerBlink,
             Duration::from_millis(1000),
         );
