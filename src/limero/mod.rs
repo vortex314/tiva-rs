@@ -379,14 +379,14 @@ where
 //====================== Sink ======================
 
 pub struct Sink<CMD> {
-    func: fn(&CMD),
+    func: Box< dyn FnOnce(&CMD)>,
 }
 impl<CMD> Sink<CMD>
 where
     CMD: Clone + Default,
 {
-    pub fn new(func: fn(&CMD)) -> Self {
-        Sink { func }
+    pub fn new(func: &'static dyn FnOnce(&CMD)) -> Self {
+        Sink { func:Box::new(func) }
     }
 }
 

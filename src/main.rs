@@ -198,21 +198,21 @@ async fn main(spawner: Spawner) {
         info!("subscribe {}",  msg);
     }
 
-    Sink::new(|msg| match msg {
+   /*  let x = Sink::new(&|msg| match msg {
         Msg::Publish("led_blue", msg) => {
             led_blue.on(&LedCmd::On);
         },
-        Msg::Publish("led_blue", msg) => {
+        Msg::Publish("led_red", msg) => {
             led_red.on(&LedCmd::On);
         },
         _ => {}
-    });
+    });*/
 
     let func = |msg| match msg {
         Msg::Publish("led_blue", msg) => {
             led_blue.on(&LedCmd::On);
         },
-        Msg::Publish("led_blue", msg) => {
+        Msg::Publish("led_red", msg) => {
             led_red.on(&LedCmd::On);
         },
         _ => {}
@@ -222,12 +222,12 @@ async fn main(spawner: Spawner) {
         ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
         ButtonEvent::Released => Some(LedCmd::Blink(50)),
     });
-    let mut log_button = Sink::new(|x| match x {
+    let mut log_button = Sink::new(&|x| match x {
         ButtonEvent::Pressed => info!("button pressed"),
         ButtonEvent::Released => info!("button released"),
     });
 
-    let mut log_button2 = Sink::new(|x| match x {
+    let mut log_button2 = Sink::new(&|x| match x {
         ButtonEvent::Pressed => info!("button2 pressed"),
         ButtonEvent::Released => info!("button2 released"),
     });
