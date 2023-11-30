@@ -44,7 +44,6 @@ use tm4c123x_hal::{self as hal, prelude::*};
 use log::{info, Level};
 use panic_semihosting as _;
 
-
 mod limero;
 use limero::*;
 
@@ -83,7 +82,6 @@ mqtt.tell(RouteReq("dst/+/object/prop",object_actor));
 mqtt >> filter(MqttMsg::Publish("dst/+/led/left",x))
 
 */
-
 
 /*#[embassy_executor::task]
 async fn test_task() {
@@ -175,59 +173,74 @@ async fn main(spawner: Spawner) {
             }
         }
     });*/
-    let mut button = ActorRef::new(Box::new(Button::new(switch1)),2);
-    let mut button2 = ActorRef::new(Box::new(Button::new(switch2)),2);
+    let mut button = ActorRef::new(Box::new(Button::new(switch1)), 2);
+    let mut button2 = ActorRef::new(Box::new(Button::new(switch2)), 2);
 
-    let mut led_red = ActorRef::new(Box::new(Led::new(pin_red)),3);
-    let mut led_blue = ActorRef::new(Box::new(Led::new(pin_blue)),3);
-    let mut led_green = ActorRef::new(Box::new(Led::new(pin_green)),3);
+    let mut led_red = ActorRef::new(Box::new(Led::new(pin_red)), 3);
+    let mut led_blue = ActorRef::new(Box::new(Led::new(pin_blue)), 3);
+    let mut led_green = ActorRef::new(Box::new(Led::new(pin_green)), 3);
 
     // let mut mqtt = ActorRef::new(Box::new(Mqtt::new()),1);
     // let mut topic_router = ActorRef::new(Box::new(TopicRouter::new()),1);
     // mqtt >> map(|x| match x { MqttMsg::Publish(topic,msg) => Some(RouteReq(topic,msg)) } ) >> topic_router;
-#[derive(Clone,Default)]
+    #[derive(Clone, Default)]
     enum Msg<'a> {
         #[default]
         Start,
         Publish(&'a str, &'a str),
     }
 
-    let msg = Msg::Publish("topic","aaaaa");
+    let msg = Msg::Publish("topic", "aaaaa");
 
     if let Msg::Publish("str", msg) = msg {
-        info!("subscribe {}",  msg);
+        info!("subscribe {}", msg);
     }
 
-   /*  let x = Sink::new(&|msg| match msg {
+    let led_blue_clone = led_blue.clone();
+    let led_red_clone = led_red.clone();
+    let f =   move |msg | match msg {
         Msg::Publish("led_blue", msg) => {
-            led_blue.on(&LedCmd::On);
-        },
+            led_blue_clone.tell(&LedCmd::On);
+        }
         Msg::Publish("led_red", msg) => {
-            led_red.on(&LedCmd::On);
-        },
-        _ => {}
-    });*/
-
-    let func = |msg| match msg {
-        Msg::Publish("led_blue", msg) => {
-            led_blue.on(&LedCmd::On);
-        },
-        Msg::Publish("led_red", msg) => {
-            led_red.on(&LedCmd::On);
-        },
+            led_red_clone.tell(&LedCmd::On);
+        }
         _ => {}
     };
-    
+
+   
+    let z  = |msg:&_| -> () { match msg {
+        Msg::Publish("led_blue", msg) => {
+            led_blue.tell(&LedCmd::On);
+        }
+        Msg::Publish("led_red", msg) => {
+            led_red.tell(&LedCmd::On);
+        }
+        _ => {}
+    }};
+
+    let sink = Sink::new(z );
+
+    let func =  |msg| match msg {
+        Msg::Publish("led_blue", msg) => {
+            led_blue.tell(&LedCmd::On);
+        }
+        Msg::Publish("led_red", msg) => {
+            led_red.tell(&LedCmd::On);
+        }
+        _ => {}
+    };
+
     let mut pressed_led_on = Mapper::new(|x| match x {
         ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
         ButtonEvent::Released => Some(LedCmd::Blink(50)),
     });
-    let mut log_button = Sink::new(&|x| match x {
+    let mut log_button = Sink::new(|x| match x {
         ButtonEvent::Pressed => info!("button pressed"),
         ButtonEvent::Released => info!("button released"),
     });
 
-    let mut log_button2 = Sink::new(&|x| match x {
+    let mut log_button2 = Sink::new(|x| match x {
         ButtonEvent::Pressed => info!("button2 pressed"),
         ButtonEvent::Released => info!("button2 released"),
     });
@@ -252,8 +265,8 @@ async fn main(spawner: Spawner) {
         cortex_m::interrupt::enable();
     };
 
-    let _ = &button >> &log_button;
-    let _ = &button2 >> &log_button2;
+    let _ = button >> log_button;
+    let _ = &button2 >> log_button2;
     let _ = &button2 >> &pressed2_led_on >> &led_green;
     let _ = &button >> &pressed_led_on >> &led_red;
     info!("main loop started");

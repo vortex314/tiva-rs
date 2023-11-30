@@ -230,7 +230,7 @@ where
         r
     }
 
-    pub fn on(&self, cmd: &CMD) {
+    pub fn tell(&self, cmd: &CMD) {
         self.actor_wrapper.borrow_mut().on(cmd);
     }
 
@@ -245,7 +245,7 @@ where
     EVENT: Clone + Default,
 {
     fn on(&self, value: &CMD) {
-        self.on(value);
+        self.tell(value);
     }
 }
 
@@ -266,15 +266,15 @@ where
     }
 }
 
-impl<'a, T, U, V> Shr<&'a ActorRef<U, V>> for &'a ActorRef<T, U>
+impl<'a, T, U, V> Shr<ActorRef<U, V>> for ActorRef<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,
     V: Clone + Default + 'static,
 {
-    type Output = &'a ActorRef<U, V>;
+    type Output = ActorRef<U, V>;
 
-    fn shr(self, rhs: &'a ActorRef<U, V>) -> Self::Output {
+    fn shr(self, rhs: ActorRef<U, V>) -> Self::Output {
         self.add_listener(Box::new(rhs.clone()));
         rhs
     }
@@ -378,27 +378,31 @@ where
 }
 //====================== Sink ======================
 
-pub struct Sink<CMD> {
-    func: Box< dyn FnOnce(&CMD)>,
+pub struct Sink<F,CMD> 
+where F : Fn(&CMD){
+    func: Box< F>,
+    phantom: core::marker::PhantomData<CMD>,
 }
-impl<CMD> Sink<CMD>
+impl<F,CMD> Sink<F,CMD>
 where
     CMD: Clone + Default,
+    F: Fn(&CMD),
 {
-    pub fn new(func: &'static dyn FnOnce(&CMD)) -> Self {
-        Sink { func:Box::new(func) }
+    pub fn new(func: F) -> Self {
+        Sink { func:Box::new(func),phantom: core::marker::PhantomData }
     }
 }
 
-impl<CMD> Clone for Sink<CMD> {
+/*impl<CMD> Clone for Sink<CMD> {
     fn clone(&self) -> Self {
         Sink { func: self.func }
     }
-}
+}*/
 
-impl<CMD> Listener<CMD> for Sink<CMD>
+impl<F,CMD> Listener<CMD> for Sink<F,CMD>
 where
     CMD: Clone + Default,
+    F: Fn(&CMD),
 {
     fn on(&self, cmd: &CMD) {
         (self.func)(cmd);
@@ -407,16 +411,16 @@ where
 
 //======================  Actor >> Sink ======================
 
-impl<'a, T, U> Shr<&'a Sink<U>> for &'a ActorRef<T, U>
+impl<'a, T, U,F> Shr< Sink<F,U>> for &'a ActorRef<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,
+    F: Fn(&U) + 'static,
 {
-    type Output = &'a Sink<U>;
+    type Output = ();
 
-    fn shr(self, rhs: &'a Sink<U>) -> Self::Output {
-        self.add_listener(Box::new(rhs.clone()));
-        rhs
+    fn shr(self, rhs: Sink<F,U>) -> Self::Output {
+        self.add_listener(Box::new(rhs));
     }
 }
 
