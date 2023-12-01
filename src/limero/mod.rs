@@ -16,12 +16,12 @@ use {
 #[cfg(feature = "embassy")]
 use {alloc::boxed::Box, alloc::rc::Rc, alloc::vec::Vec, embassy_futures::block_on};
 
-use core::{cell::RefCell, mem};
 use core::ops::Shr;
+use core::{cell::RefCell, mem};
 
 use embassy_futures::select::*;
 use embassy_time::{with_timeout, Duration, Instant, TimeoutError, Timer};
-use log::{warn, info};
+use log::{info, warn};
 use mini_io_queue::asyncio;
 use mini_io_queue::asyncio::queue;
 use mini_io_queue::storage::HeapBuffer;
@@ -43,7 +43,7 @@ pub trait Listener<T> {
 }
 pub trait Publisher<T> {
     fn add_listener(&self, listener: Box<dyn Listener<T>>);
-    fn remove_listener(&self, listener_id:&Box<dyn Listener<T>>);
+    fn remove_listener(&self, listener_id: &Box<dyn Listener<T>>);
     fn emit(&self, value: &T);
 }
 pub trait Actor<CMD, EVENT> {
@@ -52,12 +52,12 @@ pub trait Actor<CMD, EVENT> {
 }
 
 fn compare_box<T: ?Sized>(left: &Box<T>, right: &Box<T>) -> bool {
-    let left : *const T = left.as_ref();
-    let right : *const T = right.as_ref();
+    let left: *const T = left.as_ref();
+    let right: *const T = right.as_ref();
     left == right
 }
 
-#[derive(Debug, Clone, PartialEq,Copy)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 struct ClockEntry<CMD> {
     expires_at: Instant,
     interval: Duration,
@@ -90,14 +90,20 @@ where
     }
     async fn recv(&mut self) -> CMD {
         let mut cmd = [CMD::default()];
-        self.cmds_reader.read(&mut cmd).await;
+    //    let cnt = self.cmds_reader.read(&mut cmd).await;
+        let r = self.cmds_reader.read_exact(&mut cmd).await;
+        if r.is_err() {
+            warn!("recv error {:?}", r);
+        } else {
+        }
+ //       self.cmds_reader.consume(cnt);
         cmd[0].clone()
     }
-    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>)  {
+    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) {
         self.listeners.push(listener);
     }
     fn remove_listener(&mut self, listener: &Box<dyn Listener<EVENT>>) {
-        self.listeners.retain(|x| compare_box(x,listener)==false);
+        self.listeners.retain(|x| compare_box(x, listener) == false);
     }
     pub fn emit(&self, value: &EVENT) {
         for listener in self.listeners.iter() {
@@ -136,7 +142,6 @@ where
         self.next_alarm = self.next_alarm();
     }
 
-
     pub fn cancel_timer(&mut self, cmd: CMD) {
         let mut i = 0;
         while i < self.clock_entries.len() {
@@ -154,7 +159,11 @@ where
         let mut clock_entry: Option<ClockEntry<CMD>> = None;
         for entry in self.clock_entries.iter() {
             if entry.expires_at <= min {
-                info!("next_alarm [{}] {} ", self.clock_entries.len(),entry.expires_at.as_millis());
+                info!(
+                    "next_alarm [{}] {} ",
+                    self.clock_entries.len(),
+                    entry.expires_at.as_millis()
+                );
                 min = entry.expires_at;
                 clock_entry = Some(entry.clone());
             }
@@ -190,17 +199,29 @@ where
     }
     async fn run(&mut self) {
         let mut buf = [CMD::default(); 1];
-        info!("ActorWrapper::run() next_alarm {}",self.next_alarm.is_some());
+        info!(
+            "ActorWrapper::run() next_alarm {}",
+            self.next_alarm.is_some()
+        );
         match &self.next_alarm {
             Some(clock_entry) => {
-                info!("next alarm in {} ms", clock_entry.expires_at.as_millis());
-                let timeout = clock_entry.expires_at - Instant::now();
-                let res = with_timeout(timeout, self.process_message()).await;
-                match res {
-                    Err(TimeoutError) => {
-                        self.handle_timeout();
+                info!(
+                    "next alarm at  {} vs {} ",
+                    clock_entry.expires_at.as_millis(),
+                    Instant::now().as_millis()
+                );
+                if clock_entry.expires_at <= Instant::now() {
+                    // clock passed
+                    self.handle_timeout();
+                } else {
+                    let timeout = clock_entry.expires_at - Instant::now();
+                    let res = with_timeout(timeout, self.process_message()).await;
+                    match res {
+                        Err(TimeoutError) => {
+                            self.handle_timeout();
+                        }
+                        Ok(()) => {}
                     }
-                    Ok(()) => {}
                 }
             }
             None => {
@@ -254,7 +275,7 @@ where
     CMD: Clone + Default,
     EVENT: Clone + Default,
 {
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>)  {
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) {
         self.actor_wrapper.borrow_mut().add_listener(listener);
     }
 
@@ -333,12 +354,14 @@ where
     CMD: Clone + Default,
     EVENT: Clone + Default,
 {
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>)  {
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) {
         self.listeners.borrow_mut().push(listener);
     }
 
     fn remove_listener(&self, listener: &Box<dyn Listener<EVENT>>) {
-        self.listeners.borrow_mut().retain(|x| compare_box(x,listener)==false);
+        self.listeners
+            .borrow_mut()
+            .retain(|x| compare_box(x, listener) == false);
     }
     fn emit(&self, value: &EVENT) {
         for listener in self.listeners.borrow().iter() {
@@ -378,18 +401,23 @@ where
 }
 //====================== Sink ======================
 
-pub struct Sink<F,CMD> 
-where F : Fn(&CMD){
-    func: Box< F>,
+pub struct Sink<F, CMD>
+where
+    F: Fn(&CMD),
+{
+    func: Box<F>,
     phantom: core::marker::PhantomData<CMD>,
 }
-impl<F,CMD> Sink<F,CMD>
+impl<F, CMD> Sink<F, CMD>
 where
     CMD: Clone + Default,
     F: Fn(&CMD),
 {
     pub fn new(func: F) -> Self {
-        Sink { func:Box::new(func),phantom: core::marker::PhantomData }
+        Sink {
+            func: Box::new(func),
+            phantom: core::marker::PhantomData,
+        }
     }
 }
 
@@ -399,7 +427,7 @@ where
     }
 }*/
 
-impl<F,CMD> Listener<CMD> for Sink<F,CMD>
+impl<F, CMD> Listener<CMD> for Sink<F, CMD>
 where
     CMD: Clone + Default,
     F: Fn(&CMD),
@@ -411,7 +439,7 @@ where
 
 //======================  Actor >> Sink ======================
 
-impl<'a, T, U,F> Shr< Sink<F,U>> for &'a ActorRef<T, U>
+impl<'a, T, U, F> Shr<Sink<F, U>> for &'a ActorRef<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,
@@ -419,7 +447,7 @@ where
 {
     type Output = ();
 
-    fn shr(self, rhs: Sink<F,U>) -> Self::Output {
+    fn shr(self, rhs: Sink<F, U>) -> Self::Output {
         self.add_listener(Box::new(rhs));
     }
 }

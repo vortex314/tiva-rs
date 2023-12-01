@@ -265,7 +265,7 @@ async fn main(spawner: Spawner) {
         cortex_m::interrupt::enable();
     };
 
-    let _ = button >> log_button;
+    let _ = &button >> log_button;
     let _ = &button2 >> log_button2;
     let _ = &button2 >> &pressed2_led_on >> &led_green;
     let _ = &button >> &pressed_led_on >> &led_red;
