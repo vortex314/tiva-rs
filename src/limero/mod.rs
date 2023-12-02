@@ -25,6 +25,7 @@ use log::{info, warn};
 use mini_io_queue::asyncio;
 use mini_io_queue::asyncio::queue;
 use mini_io_queue::storage::HeapBuffer;
+use embassy_sync::{channel, blocking_mutex::raw::NoopRawMutex};
 
 use nb::block;
 
@@ -48,7 +49,7 @@ pub trait Publisher<T> {
 }
 pub trait Actor<CMD, EVENT> {
     fn init(&mut self, wrapper: &mut ActorWrapper<CMD, EVENT>);
-    fn on(&mut self, cmd: &CMD, me: &mut ActorWrapper<CMD, EVENT>);
+    fn on(&mut self, cmd: &CMD, me: &mut  ActorWrapper<CMD, EVENT>);
 }
 
 fn compare_box<T: ?Sized>(left: &Box<T>, right: &Box<T>) -> bool {
@@ -66,9 +67,13 @@ struct ClockEntry<CMD> {
 }
 
 pub struct ActorWrapper<CMD, EVENT> {
+    actor : Box<dyn Actor<CMD, EVENT>>,
     listeners: Vec<Box<dyn Listener<EVENT>>>, // invoked on EVENT
-    cmds_reader: asyncio::Reader<HeapBuffer<CMD>>, // used by actor itself
-    cmds_writer: asyncio::Writer<HeapBuffer<CMD>>,
+//    cmds_reader: asyncio::Reader<HeapBuffer<CMD>>, // used by actor itself
+//    cmds_writer: asyncio::Writer<HeapBuffer<CMD>>,
+//    cmds_reader : channel::Receiver<NoopRawMutex,CMD,3>,
+ //   cmds_writer : channel::Sender<NoopRawMutex,CMD,3>,
+    channel: channel::Channel<NoopRawMutex,CMD,3>,
     clock_entries: Vec<ClockEntry<CMD>>,
     next_alarm: Option<ClockEntry<CMD>>,
 }
@@ -78,26 +83,21 @@ where
     CMD: Clone + Default,
     EVENT: Clone + Default,
 {
-    fn new(capacity: usize) -> ActorWrapper<CMD, EVENT> {
-        let (mut reader, mut writer) = queue(capacity);
+    fn new(actor : Box<dyn Actor<CMD,EVENT>>,capacity:  usize) -> ActorWrapper<CMD, EVENT> {
+        // let (mut reader, mut writer) = queue(capacity);
+        let channel = channel::Channel::<NoopRawMutex,CMD,3>::new();
         ActorWrapper {
+            actor,
             listeners: Vec::new(),
-            cmds_reader: reader,
-            cmds_writer: writer,
+    //        cmds_reader: r,
+    //        cmds_writer: s,
+            channel,
             clock_entries: Vec::new(),
             next_alarm: None,
         }
     }
     async fn recv(&mut self) -> CMD {
-        let mut cmd = [CMD::default()];
-    //    let cnt = self.cmds_reader.read(&mut cmd).await;
-        let r = self.cmds_reader.read_exact(&mut cmd).await;
-        if r.is_err() {
-            warn!("recv error {:?}", r);
-        } else {
-        }
- //       self.cmds_reader.consume(cnt);
-        cmd[0].clone()
+        self.channel.receive().await
     }
     fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) {
         self.listeners.push(listener);
@@ -111,14 +111,15 @@ where
         }
     }
     fn on(&mut self, cmd: &CMD) {
-        let buf = [cmd.clone()];
-        if block_on(self.cmds_writer.write(&buf)) == 0 {
-            warn!(" cannot write command ")
-        };
+        let res = self.channel.try_send(cmd.clone());
+        match res {
+            Ok(()) => {}
+            Err(_) => {
+                warn!("ActorWrapper::on() queue full");
+            }
+        }
     }
-    fn has_space(&self) -> bool {
-        self.cmds_writer.has_space()
-    }
+
     // set timer to send cmd after delay
     pub fn set_alarm(&mut self, cmd: CMD, clock: Instant) {
         info!("set_alarm {} ", clock.as_millis());
@@ -172,11 +173,14 @@ where
     }
 
     fn handle_timeout(&mut self) {
+        info!("handle_timeout()");
         let mut i = 0;
         while i < self.clock_entries.len() {
+            info!("handle_timeout() index [{}]", i);
             if self.clock_entries[i].expires_at <= Instant::now() {
                 let cmd = self.clock_entries[i].cmd.clone();
-                self.on(&cmd);
+                let actor = &mut self.actor;
+                actor.on(&cmd, self);
                 if self.clock_entries[i].repeat {
                     let interval = self.clock_entries[i].interval;
                     self.clock_entries[i].expires_at += interval;
@@ -195,21 +199,13 @@ where
     // if no entry, wait forever
     async fn process_message(&mut self) {
         let cmd = self.recv().await;
-        self.on(&cmd);
+        let actor = &mut self.actor;
+        actor.on(&cmd, self);
     }
     async fn run(&mut self) {
         let mut buf = [CMD::default(); 1];
-        info!(
-            "ActorWrapper::run() next_alarm {}",
-            self.next_alarm.is_some()
-        );
         match &self.next_alarm {
             Some(clock_entry) => {
-                info!(
-                    "next alarm at  {} vs {} ",
-                    clock_entry.expires_at.as_millis(),
-                    Instant::now().as_millis()
-                );
                 if clock_entry.expires_at <= Instant::now() {
                     // clock passed
                     self.handle_timeout();
@@ -225,7 +221,6 @@ where
                 }
             }
             None => {
-                info!("no alarm");
                 self.process_message().await;
             }
         }
@@ -233,7 +228,6 @@ where
 }
 
 pub struct ActorRef<CMD, EVENT> {
-    actor: Rc<RefCell<Box<dyn Actor<CMD, EVENT>>>>,
     actor_wrapper: Rc<RefCell<ActorWrapper<CMD, EVENT>>>,
 }
 
@@ -244,15 +238,14 @@ where
 {
     pub fn new(actor: Box<dyn Actor<CMD, EVENT>>, capacity: usize) -> ActorRef<CMD, EVENT> {
         let r = ActorRef {
-            actor: Rc::new(RefCell::new(actor)),
-            actor_wrapper: Rc::new(RefCell::new(ActorWrapper::new(capacity))),
+            actor_wrapper: Rc::new(RefCell::new(ActorWrapper::new(actor,capacity))),
         };
-        r.actor.borrow_mut().init(&mut r.actor_wrapper.borrow_mut());
+        r.actor_wrapper.borrow_mut().actor.init(&mut r.actor_wrapper.borrow_mut());
         r
     }
 
     pub fn tell(&self, cmd: &CMD) {
-        self.actor_wrapper.borrow_mut().on(cmd);
+        let _ = self.actor_wrapper.borrow_mut().channel.try_send(cmd.clone());
     }
 
     pub async fn run(&self) {
@@ -305,7 +298,6 @@ impl<CMD, EVENT> Clone for ActorRef<CMD, EVENT> {
     fn clone(&self) -> Self {
         ActorRef {
             actor_wrapper: Rc::clone(&self.actor_wrapper),
-            actor: Rc::clone(&self.actor),
         }
     }
 }

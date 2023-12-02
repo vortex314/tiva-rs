@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![feature(const_type_id)]
-#![deny(elided_lifetimes_in_paths)]
+//#![deny(elided_lifetimes_in_paths)]
 
 extern crate alloc;
 
@@ -271,13 +271,14 @@ async fn main(spawner: Spawner) {
     let _ = &button >> &pressed_led_on >> &led_red;
     info!("main loop started");
     loop {
-        embassy_futures::select::select4(
+        led_red.run().await;
+        /*embassy_futures::select::select4(
             button.run(),
             led_red.run(),
             button2.run(),
             led_green.run(),
         )
-        .await;
+        .await;*/
     }
 }
 
