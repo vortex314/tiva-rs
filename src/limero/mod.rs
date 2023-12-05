@@ -84,6 +84,7 @@ trait Actor<CMD,EVENT,TIMER_EVENT> : Listener<CMD> + Publisher<EVENT> + Listener
 */
 
 use nb::block;
+//use tm4c123x_hal::pwm::Timer;
 
 #[derive(Debug, Clone, Default)]
 pub enum NoEvent {
@@ -104,8 +105,8 @@ pub trait Publisher<T> {
     fn emit(&self, value: &T);
 }
 pub trait Actor<CMD, EVENT> {
-    fn init(&mut self, wrapper: &mut ActorWrapper<CMD, EVENT>);
-    fn on(&mut self, cmd: &CMD, wrapper: &mut ActorWrapper<CMD, EVENT>);
+    fn init(&mut self, wrapper: &mut TimerScheduler<CMD>);
+    fn on(&mut self, cmd: &CMD, scheduler: &mut TimerScheduler<CMD>,publisher:&mut dyn Publisher<EVENT>);
 }
 
 fn compare_box<T: ?Sized>(left: &Box<T>, right: &Box<T>) -> bool {
@@ -122,7 +123,7 @@ struct ClockEntry<CMD> {
     repeat: bool,
 }
 
-struct TimerScheduler<CMD> {
+pub struct TimerScheduler<CMD> {
     clock_entries: Vec<ClockEntry<CMD>>,
     next_alarm: Option<ClockEntry<CMD>>,
 }
@@ -241,7 +242,7 @@ where
     }
 
     fn init(&mut self) {
-        self.actor.unwrap().init(&mut self);
+        self.actor.unwrap().init(&mut self.timer_scheduler);
     }
 
     async fn recv(&mut self) -> CMD {
@@ -275,7 +276,7 @@ where
     async fn process_message(&mut self) {
         let cmd = self.recv().await;
         let mut actor = self.actor.take().unwrap();
-        actor.on(&cmd, self);
+        actor.on(&cmd, &mut self.timer_scheduler,&mut self);
     }
     async fn run(&mut self) {
         let mut buf = [CMD::default(); 1];
