@@ -1,6 +1,7 @@
 use crate::limero::*;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use embassy_time::Instant;
 use embedded_hal::digital::OutputPin;
 
 use core::cell::RefCell;
@@ -16,6 +17,7 @@ pub enum EchoCmd {
     #[default]
     EchoEmpty,
     EchoMsg(u32, u64),
+    EchoTimer,
 }
 
 pub struct Echo {
@@ -33,20 +35,23 @@ impl Echo {
 }
 
 impl Actor<EchoCmd, EchoCmd> for Echo {
-    fn init(&mut self, wrapper: &mut ActorWrapper<EchoCmd, EchoCmd>) {
+    fn init(&mut self, scheduler:&mut TimerScheduler<EchoCmd>) {
         info!("Echo init");
-        wrapper.emit(&EchoCmd::EchoMsg(0, self.start_time));
+        scheduler.set_alarm(EchoCmd::EchoTimer,Instant::now()+Duration::from_millis(1000));
     }
-    fn on(&mut self, cmd: &EchoCmd, _me: &mut ActorWrapper<EchoCmd, EchoCmd>) {
+    fn on(&mut self, cmd: &EchoCmd, _scheduler:&mut TimerScheduler<EchoCmd>,emitter:&mut dyn Publisher<EchoCmd>) {
         match cmd {
             EchoCmd::EchoEmpty => {}
             EchoCmd::EchoMsg(count, start) => {
                 if *count < self.max_count {
-                    _me.emit(&EchoCmd::EchoMsg(count + 1, *start));
+                    emitter.emit(&EchoCmd::EchoMsg(count + 1, *start));
                 } else {
                     let now = msec();
                     info!("Echo {} ms", now - start);
                 }
+            }
+            EchoCmd::EchoTimer => {
+                emitter.emit(&EchoCmd::EchoMsg(0, Instant::now().as_millis()));
             }
         }
     }

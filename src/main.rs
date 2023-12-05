@@ -196,8 +196,8 @@ async fn main(spawner: Spawner) {
         info!("subscribe {}", msg);
     }
 
-    let led_blue_clone = led_blue.clone();
-    let led_red_clone = led_red.clone();
+    let mut led_blue_clone = led_blue.clone();
+    let mut led_red_clone = led_red.clone();
     let f =   move |msg | match msg {
         Msg::Publish("led_blue", msg) => {
             led_blue_clone.tell(&LedCmd::On);
@@ -265,10 +265,10 @@ async fn main(spawner: Spawner) {
         cortex_m::interrupt::enable();
     };
 
-    let _ = &button >> log_button;
+    let _ = &button >> & log_button;
     let _ = &button2 >> log_button2;
-    let _ = &button2 >> &pressed2_led_on >> &led_green;
-    let _ = &button >> &pressed_led_on >> &led_red;
+    let _ = &mut button2 >> &mut pressed2_led_on >> &mut led_green;
+    let _ = &button >> &pressed_led_on >> &mut led_red;
     info!("main loop started");
     loop {
         led_red.run().await;

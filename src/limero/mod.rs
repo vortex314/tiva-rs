@@ -100,10 +100,12 @@ pub trait Listener<T> {
     fn on(&self, value: &T);
 }
 pub trait Publisher<T> {
-    fn add_listener(&self, listener: Box<dyn Listener<T>>);
-    fn remove_listener(&self, listener: &Box<dyn Listener<T>>);
+    fn add_listener(&mut self, listener: Box<dyn Listener<T>>);
+    fn remove_listener(&mut self, listener: &Box<dyn Listener<T>>);
     fn emit(&self, value: &T);
 }
+
+
 pub trait Actor<CMD, EVENT> {
     fn init(&mut self, wrapper: &mut TimerScheduler<CMD>);
     fn on(&mut self, cmd: &CMD, scheduler: &mut TimerScheduler<CMD>,publisher:&mut dyn Publisher<EVENT>);
@@ -215,11 +217,37 @@ where
     }
 }
 
+pub struct Emitter<EVENT> {
+    listeners: Vec<Box<dyn Listener<EVENT>>>,
+}
+
+impl<EVENT> Emitter<EVENT> {
+    fn new() -> Emitter<EVENT> {
+        Emitter {
+            listeners: Vec::new(),
+        }
+    }
+}
+
+impl<EVENT> Publisher<EVENT> for Emitter<EVENT> {
+    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) {
+        self.listeners.push(listener);
+    }
+    fn remove_listener(&mut self, listener: &Box<dyn Listener<EVENT>>) {
+        self.listeners.retain(|x| compare_box(x, listener) == false);
+    }
+    fn emit(&self, value: &EVENT) {
+        for listener in self.listeners.iter() {
+            listener.on(value);
+        }
+    }
+}
+
 pub struct ActorWrapper<CMD, EVENT> {
-    actor: Option<Box<dyn Actor<CMD, EVENT>>>,
-    listeners: Vec<Box<dyn Listener<EVENT>>>, // invoked on EVENT
+    actor: Box<dyn Actor<CMD, EVENT>>,
+    emitter: Emitter<EVENT>,
     channel: channel::Channel<NoopRawMutex, CMD, 3>,
-    pub timer_scheduler: TimerScheduler<CMD>,
+    timer_scheduler: TimerScheduler<CMD>,
 }
 
 impl<CMD, EVENT> ActorWrapper<CMD, EVENT>
@@ -232,8 +260,8 @@ where
         let channel = channel::Channel::<NoopRawMutex, CMD, 3>::new();
         let timer_scheduler = TimerScheduler::<CMD>::new();
         ActorWrapper {
-            actor: Some(actor),
-            listeners: Vec::new(),
+            actor,
+            emitter: Emitter::new() ,
             //        cmds_reader: r,
             //        cmds_writer: s,
             channel,
@@ -242,23 +270,14 @@ where
     }
 
     fn init(&mut self) {
-        self.actor.unwrap().init(&mut self.timer_scheduler);
+        self.actor.init(&mut self.timer_scheduler);
     }
 
     async fn recv(&mut self) -> CMD {
         self.channel.receive().await
     }
-    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) {
-        self.listeners.push(listener);
-    }
-    fn remove_listener(&mut self, listener: &Box<dyn Listener<EVENT>>) {
-        self.listeners.retain(|x| compare_box(x, listener) == false);
-    }
-    pub fn emit(&self, value: &EVENT) {
-        for listener in self.listeners.iter() {
-            listener.on(value);
-        }
-    }
+    
+    
     fn on(&mut self, cmd: &CMD) {
         let res = self.channel.try_send(cmd.clone());
         match res {
@@ -275,8 +294,7 @@ where
     // if no entry, wait forever
     async fn process_message(&mut self) {
         let cmd = self.recv().await;
-        let mut actor = self.actor.take().unwrap();
-        actor.on(&cmd, &mut self.timer_scheduler,&mut self);
+        self.actor.on(&cmd, &mut self.timer_scheduler,&mut self.emitter);
     }
     async fn run(&mut self) {
         let mut buf = [CMD::default(); 1];
@@ -331,6 +349,17 @@ where
     pub async fn run(&self) {
         self.actor_wrapper.borrow_mut().run().await;
     }
+
+    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) {
+        self.actor_wrapper.borrow_mut().emitter.add_listener(listener);
+    }
+
+    fn remove_listener(&self, listener: &Box<dyn Listener<EVENT>>) {
+        self.actor_wrapper.borrow_mut().emitter.remove_listener(listener);
+    }
+    fn emit(&self, value: &EVENT) {
+        self.actor_wrapper.borrow().emitter.emit(value);
+    }
 }
 
 impl<CMD, EVENT> Listener<CMD> for ActorRef<CMD, EVENT>
@@ -343,22 +372,6 @@ where
     }
 }
 
-impl<CMD, EVENT> Publisher<EVENT> for ActorRef<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) {
-        self.actor_wrapper.borrow_mut().add_listener(listener);
-    }
-
-    fn remove_listener(&self, listener: &Box<dyn Listener<EVENT>>) {
-        self.actor_wrapper.borrow_mut().remove_listener(listener);
-    }
-    fn emit(&self, value: &EVENT) {
-        self.actor_wrapper.borrow().emit(value);
-    }
-}
 
 impl<'a, T, U, V> Shr<ActorRef<U, V>> for ActorRef<T, U>
 where
@@ -386,14 +399,14 @@ impl<CMD, EVENT> Clone for ActorRef<CMD, EVENT> {
 
 pub struct Mapper<CMD, EVENT> {
     func: fn(&CMD) -> Option<EVENT>,
-    listeners: Rc<RefCell<Vec<Box<dyn Listener<EVENT>>>>>,
+    emitter: Emitter<EVENT>,
 }
 
 impl<CMD, EVENT> Clone for Mapper<CMD, EVENT> {
     fn clone(&self) -> Self {
         Mapper {
             func: self.func,
-            listeners: Rc::clone(&self.listeners),
+            emitter: Emitter::new(),
         }
     }
 }
@@ -406,8 +419,18 @@ where
     pub fn new(func: fn(&CMD) -> Option<EVENT>) -> Self {
         Mapper {
             func,
-            listeners: Rc::new(RefCell::new(Vec::new())),
+            emitter: Emitter::new(),
         }
+    }
+    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) {
+        self.emitter.add_listener(listener);
+    }
+
+    fn remove_listener(&mut self, listener: &Box<dyn Listener<EVENT>>) {
+        self.emitter.remove_listener(listener);
+    }
+    fn emit(&self, value: &EVENT) {
+        self.emitter.emit(value);
     }
 }
 
@@ -421,26 +444,6 @@ where
     }
 }
 
-impl<EVENT, CMD> Publisher<EVENT> for Mapper<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) {
-        self.listeners.borrow_mut().push(listener);
-    }
-
-    fn remove_listener(&self, listener: &Box<dyn Listener<EVENT>>) {
-        self.listeners
-            .borrow_mut()
-            .retain(|x| compare_box(x, listener) == false);
-    }
-    fn emit(&self, value: &EVENT) {
-        for listener in self.listeners.borrow().iter() {
-            listener.on(value);
-        }
-    }
-}
 //======================  Actor >> Handler >> ... ======================
 
 impl<'a, T, U, V> Shr<&'a Mapper<U, V>> for &'a ActorRef<T, U>
@@ -458,7 +461,7 @@ where
 }
 //======================  Handler >> Actor >> ... ======================
 
-impl<'a, T, U, V> Shr<&'a ActorRef<U, V>> for &'a Mapper<T, U>
+impl<'a, T, U, V> Shr<&'a ActorRef<U, V>> for &'a mut Mapper<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,
@@ -511,7 +514,7 @@ where
 
 //======================  Actor >> Sink ======================
 
-impl<'a, T, U, F> Shr<Sink<F, U>> for &'a ActorRef<T, U>
+impl<'a, T, U, F> Shr<Sink<F, U>> for &'a mut ActorRef<T, U>
 where
     T: Clone + Default + 'static,
     U: Clone + Default + 'static,

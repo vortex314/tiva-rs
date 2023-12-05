@@ -67,7 +67,7 @@ impl Button {
 }
 
 impl Actor<ButtonCmd,ButtonEvent> for Button {
-    fn init(&mut self, wrapper: &mut ActorWrapper<ButtonCmd, ButtonEvent>) {
+    fn init(&mut self, scheduler: &mut TimerScheduler<ButtonCmd>) {
         info!("Button init");
         let p = unsafe { tm4c123x::Peripherals::steal() };
         let mut sysctl = p.SYSCTL.constrain();
@@ -78,7 +78,7 @@ impl Actor<ButtonCmd,ButtonEvent> for Button {
             BUTTON_STATE = Some(Box::new(switch1));
         }
     }
-    fn on(&mut self, cmd: &ButtonCmd, _me: &mut ActorWrapper<ButtonCmd, ButtonEvent>) {
+    fn on(&mut self, cmd: &ButtonCmd, scheduler: &mut TimerScheduler<ButtonCmd>, emitter: &mut dyn Publisher<ButtonEvent>) {
         match cmd {
             ButtonCmd::Init => {
                 let p = unsafe { tm4c123x::Peripherals::steal() };
@@ -91,10 +91,10 @@ impl Actor<ButtonCmd,ButtonEvent> for Button {
                 }
             }
             ButtonCmd::Open => {
-                _me.emit(&ButtonEvent::Released);
+                emitter.emit(&ButtonEvent::Released);
             }
             ButtonCmd::Close => {
-                _me.emit(&ButtonEvent::Pressed)
+                emitter.emit(&ButtonEvent::Pressed)
             }
         }
     }
