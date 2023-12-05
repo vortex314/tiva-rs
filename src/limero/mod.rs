@@ -38,7 +38,7 @@ use mini_io_queue::storage::HeapBuffer;
 // led.handle(LedCmd::Blink(200))
 // Led : Listener<LedCmd>, Publisher<LedEvent>
 // button.event >> transform(|x| { Pressed => Blink(100)}) >> led.cmd
-/* 
+/*
 use alloc::string::{String, ToString};
 use serde::Serialize;
 use serde::Deserialize;
@@ -74,7 +74,7 @@ impl Listener<MqttCmd<'_>> for MqttActor {
     }
 }
 
-// 
+//
 
 trait Actor<CMD,EVENT,TIMER_EVENT> : Listener<CMD> + Publisher<EVENT> + Listener<TIMER_EVENT> {
     fn init(&mut self,wrapper : &mut ActorWrapper<CMD, EVENT,TIMER_EVENT>);
@@ -104,8 +104,8 @@ pub trait Publisher<T> {
     fn emit(&self, value: &T);
 }
 pub trait Actor<CMD, EVENT> {
-    fn init(&mut self,wrapper : &mut ActorWrapper<CMD, EVENT>);
-    fn on(&mut self, cmd: &CMD,wrapper : &mut ActorWrapper<CMD, EVENT>) ;
+    fn init(&mut self, wrapper: &mut ActorWrapper<CMD, EVENT>);
+    fn on(&mut self, cmd: &CMD, wrapper: &mut ActorWrapper<CMD, EVENT>);
 }
 
 fn compare_box<T: ?Sized>(left: &Box<T>, right: &Box<T>) -> bool {
@@ -127,10 +127,10 @@ struct TimerScheduler<CMD> {
     next_alarm: Option<ClockEntry<CMD>>,
 }
 
-impl<CMD> TimerScheduler<CMD> 
-where 
+impl<CMD> TimerScheduler<CMD>
+where
     CMD: Clone + Default,
-    {
+{
     fn new() -> TimerScheduler<CMD> {
         TimerScheduler {
             clock_entries: Vec::new(),
@@ -184,7 +184,7 @@ where
                     entry.expires_at.as_millis()
                 );
                 min = entry.expires_at;
-                let ec  = entry;
+                let ec = entry;
                 clock_entry = Some((*ec).clone());
             }
         }
@@ -231,7 +231,7 @@ where
         let channel = channel::Channel::<NoopRawMutex, CMD, 3>::new();
         let timer_scheduler = TimerScheduler::<CMD>::new();
         ActorWrapper {
-            actor:Some(actor),
+            actor: Some(actor),
             listeners: Vec::new(),
             //        cmds_reader: r,
             //        cmds_writer: s,
@@ -270,7 +270,7 @@ where
     async fn process_message(&mut self) {
         let cmd = self.recv().await;
         let mut actor = self.actor.take().unwrap();
-        actor.on(&cmd,self);
+        actor.on(&cmd, self);
     }
     async fn run(&mut self) {
         let mut buf = [CMD::default(); 1];
@@ -314,7 +314,8 @@ where
 {
     pub fn new(mut actor: Box<dyn Actor<CMD, EVENT>>, capacity: usize) -> ActorRef<CMD, EVENT> {
         let mut wrapper = ActorWrapper::new(actor, capacity);
-        actor.init(&mut wrapper);
+        wrapper.actor.as_ref().unwrap().init(&mut wrapper);
+        wrapper.actor.expect("no actor found").init(&mut wrapper);
         let r = ActorRef {
             actor_wrapper: Rc::new(RefCell::new(wrapper)),
         };
@@ -322,11 +323,7 @@ where
     }
 
     pub fn tell(&self, cmd: &CMD) {
-        let _ = self
-            .actor_wrapper
-            .borrow()
-            .channel
-            .try_send(cmd.clone());
+        let _ = self.actor_wrapper.borrow().channel.try_send(cmd.clone());
     }
 
     pub async fn run(&self) {
