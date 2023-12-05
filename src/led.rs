@@ -38,9 +38,9 @@ impl Led {
 }
 
 impl Actor<LedCmd, NoEvent> for Led {
-    fn init(&mut self, wrapper: &mut ActorWrapper<LedCmd, NoEvent>) {
+    fn init(&mut self,wrapper:&mut ActorWrapper<LedCmd,NoEvent>) {
         info!("Led init");
-        wrapper.interval_timer(
+        wrapper.timer_scheduler.interval_timer(
             LedCmd::TimerBlink,
             Duration::from_millis(1000),
         );
@@ -48,7 +48,7 @@ impl Actor<LedCmd, NoEvent> for Led {
         self.pin_high = true;
         self.state = LedCmd::On;
     }
-    fn on(&mut self, cmd: &LedCmd, _me: &mut ActorWrapper<LedCmd, NoEvent>) {
+    fn on(&mut self, cmd: &LedCmd,wrapper:&mut ActorWrapper<LedCmd,NoEvent>) {
         info!("Led cmd {:?}", cmd);
         self.state = cmd.clone();
         match cmd {
@@ -61,7 +61,7 @@ impl Actor<LedCmd, NoEvent> for Led {
                 self.pin_high = false;
             }
             LedCmd::Blink(intv) => {
-                _me.set_alarm(
+                wrapper.timer_scheduler.set_alarm(
                     LedCmd::TimerBlink,
                     Instant::now() + Duration::from_millis(*intv as u64),
                 );
