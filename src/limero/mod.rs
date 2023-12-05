@@ -239,6 +239,11 @@ where
             timer_scheduler: TimerScheduler::new(),
         }
     }
+
+    fn init(&mut self) {
+        self.actor.unwrap().init(&mut self);
+    }
+
     async fn recv(&mut self) -> CMD {
         self.channel.receive().await
     }
@@ -313,13 +318,9 @@ where
     EVENT: Clone + Default,
 {
     pub fn new(mut actor: Box<dyn Actor<CMD, EVENT>>, capacity: usize) -> ActorRef<CMD, EVENT> {
-        let mut wrapper = ActorWrapper::new(actor, capacity);
-        wrapper.actor.as_ref().unwrap().init(&mut wrapper);
-        wrapper.actor.expect("no actor found").init(&mut wrapper);
-        let r = ActorRef {
-            actor_wrapper: Rc::new(RefCell::new(wrapper)),
-        };
-        r
+        ActorRef {
+            actor_wrapper: Rc::new(RefCell::new(ActorWrapper::new(actor, 3))),
+        }
     }
 
     pub fn tell(&self, cmd: &CMD) {
