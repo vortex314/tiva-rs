@@ -14,7 +14,7 @@ extern crate alloc;
 
 use core::cell::RefCell;
 use core::default;
-use core::pin::Pin;
+use core::pin::{Pin, pin};
 use core::task::{Context, Poll};
 
 use alloc::borrow;
@@ -41,7 +41,7 @@ use tm4c123x_hal::gpio::GpioExt;
 use tm4c123x_hal::sysctl::SysctlExt;
 use tm4c123x_hal::{self as hal, prelude::*};
 
-use log::{info, Level};
+use log::{info, warn, Level};
 use panic_semihosting as _;
 
 mod limero;
@@ -64,24 +64,6 @@ use topic_router::*;
 
 use embassy_executor::Executor;
 // use serial_logger::serial_logger_init;
-/*
-
-ActorRef -> ActorWrapper -> Actor
-tell -> on -> queue
-ask -> on -> queue -> poll -> future
-emit -> on -> queue -> poll -> future
-
-CMD<Messages> = enum { Message(Messages),sender:ActorRef,reply:ActorRef,context:Context }
-
-let led = ActorRef::new(Led::new(pinA1));
-let button = ActorRef::new(Button::new(pinA2));
-let mqtt = ActorRef::new(Mqtt::new());
-
-led >> button ;
-mqtt.tell(RouteReq("dst/+/object/prop",object_actor));
-mqtt >> filter(MqttMsg::Publish("dst/+/led/left",x))
-
-*/
 
 /*#[embassy_executor::task]
 async fn test_task() {
@@ -158,80 +140,15 @@ async fn main(spawner: Spawner) {
     let mut pin_uext2 = porte.pe3.into_push_pull_output();
     pin_uext1.set_low();
     pin_uext2.set_low();
-    //let mut ctrl = portf.control;
-    let switcher = core::pin::pin!(async move {
-        let switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
-        let switch1 = portf.pf4.into_pull_up_input();
-        loop {
-            if switch1.is_low() {
-                pin_blue.set_low();
-                pin_green.set_high();
-            }
-            if switch2.is_low() {
-                pin_blue.set_high();
-                pin_green.set_low();
-            }
-        }
-    });*/
-    let mut button = ActorRef::new(Box::new(Button::new(switch1)), 2);
-    let mut button2 = ActorRef::new(Box::new(Button::new(switch2)), 2);
+    */
+    let mut button = &ActorRef::new(Box::new(Button::new(switch1)), 0);
+    let mut button2 = &ActorRef::new(Box::new(Button::new(switch2)), 0);
 
-    let mut led_red = ActorRef::new(Box::new(Led::new(pin_red)), 3);
-    let mut led_blue = ActorRef::new(Box::new(Led::new(pin_blue)), 3);
-    let mut led_green = ActorRef::new(Box::new(Led::new(pin_green)), 3);
+    let mut led_red = &ActorRef::new(Box::new(Led::new(pin_red)), 3);
+    let mut led_blue = &ActorRef::new(Box::new(Led::new(pin_blue)), 3);
+    let mut led_green = &ActorRef::new(Box::new(Led::new(pin_green)), 3);
 
-    // let mut mqtt = ActorRef::new(Box::new(Mqtt::new()),1);
-    // let mut topic_router = ActorRef::new(Box::new(TopicRouter::new()),1);
-    // mqtt >> map(|x| match x { MqttMsg::Publish(topic,msg) => Some(RouteReq(topic,msg)) } ) >> topic_router;
-    #[derive(Clone, Default)]
-    enum Msg<'a> {
-        #[default]
-        Start,
-        Publish(&'a str, &'a str),
-    }
-
-    let msg = Msg::Publish("topic", "aaaaa");
-
-    if let Msg::Publish("str", msg) = msg {
-        info!("subscribe {}", msg);
-    }
-
-    let mut led_blue_clone = led_blue.clone();
-    let mut led_red_clone = led_red.clone();
-    let f =   move |msg | match msg {
-        Msg::Publish("led_blue", msg) => {
-            led_blue_clone.tell(&LedCmd::On);
-        }
-        Msg::Publish("led_red", msg) => {
-            led_red_clone.tell(&LedCmd::On);
-        }
-        _ => {}
-    };
-
-   
-    let z  = |msg:&_| -> () { match msg {
-        Msg::Publish("led_blue", msg) => {
-            led_blue.tell(&LedCmd::On);
-        }
-        Msg::Publish("led_red", msg) => {
-            led_red.tell(&LedCmd::On);
-        }
-        _ => {}
-    }};
-
-    let sink = Sink::new(z );
-
-    let func =  |msg| match msg {
-        Msg::Publish("led_blue", msg) => {
-            led_blue.tell(&LedCmd::On);
-        }
-        Msg::Publish("led_red", msg) => {
-            led_red.tell(&LedCmd::On);
-        }
-        _ => {}
-    };
-
-    let mut pressed_led_on = Mapper::new(|x| match x {
+    let mut pressed_led_on = &Mapper::new(|x| match x {
         ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
         ButtonEvent::Released => Some(LedCmd::Blink(50)),
     });
@@ -240,46 +157,37 @@ async fn main(spawner: Spawner) {
         ButtonEvent::Released => info!("button released"),
     });
 
-    let mut log_button2 = Sink::new(|x| match x {
-        ButtonEvent::Pressed => info!("button2 pressed"),
-        ButtonEvent::Released => info!("button2 released"),
+    let led_blue_clone = led_blue.clone();
+
+    let mut log_button2 = Sink::new(move |x| match x {
+        ButtonEvent::Pressed => led_blue_clone.on(&LedCmd::Blink(100)),
+        ButtonEvent::Released => led_blue_clone.on(&LedCmd::Blink(1000)),
     });
 
-    let mut pressed2_led_on = Mapper::new(|x| match x {
+    let mut pressed2_led_on = &Mapper::new(|x| match x {
         ButtonEvent::Pressed => Some(LedCmd::On),
         ButtonEvent::Released => Some(LedCmd::Off),
     });
-    // &mqtt.actor >> Mapper::new( |event| match event { Message("led_interval",x) => Some(LedCmd::Blink(x))} ) >> &led.actor; ));
-    // let led_actor = ActorRef::<LedCmd,NoEvent>::new(led);
-    // impl Actor for Led {
-    //     type Cmd = LedCmd;
-    //     type Event = NoEvent;
-    //     fn on(&mut self, cmd: &LedCmd) -> Option<NoEvent> {
-    //         match cmd {
-    //             LedCmd::On => {
-    //                 self.pin.set_high();
-    //                 Some(NoEvent)
-    //             }
 
     unsafe {
         cortex_m::interrupt::enable();
     };
 
-    let _ = &button >> & log_button;
-    let _ = &button2 >> log_button2;
-    let _ = &mut button2 >> &mut pressed2_led_on >> &mut led_green;
-    let _ = &button >> &pressed_led_on >> &mut led_red;
+    // button.via(&mut pressed_led_on).via(&mut log_button);
+    button >> log_button;
+    button2 >> log_button2;
+    let _x = button2
+        >> &mapper(|x| match x {
+            ButtonEvent::Pressed => Some(LedCmd::On),
+            ButtonEvent::Released => Some(LedCmd::Off),
+        })
+        >> led_green;
+    let _y = button2 >> pressed2_led_on >> led_green;
+    let _z = button >> pressed_led_on >> led_red;
     info!("main loop started");
-    loop {
-        led_red.run().await;
-        /*embassy_futures::select::select4(
-            button.run(),
-            led_red.run(),
-            button2.run(),
-            led_green.run(),
-        )
-        .await;*/
-    }
+    embassy_futures::select::select4(button, led_red, button2, led_green)
+        .await;
+    warn!("Stopped. Shouldn't have happened");
 }
 
 //use alloc::fmt::format;

@@ -5,6 +5,7 @@ use embassy_time::Instant;
 use embedded_hal::digital::OutputPin;
 
 use core::cell::RefCell;
+use core::task::Poll;
 use embassy_time::Duration;
 use embassy_time::Timer;
 //use embassy_futures::join::join;
@@ -39,7 +40,7 @@ impl Actor<EchoCmd, EchoCmd> for Echo {
         info!("Echo init");
         scheduler.set_alarm(EchoCmd::EchoTimer,Instant::now()+Duration::from_millis(1000));
     }
-    fn on(&mut self, cmd: &EchoCmd, _scheduler:&mut TimerScheduler<EchoCmd>,emitter:&mut dyn Publisher<EchoCmd>) {
+    fn on(&mut self, cmd: &EchoCmd, _scheduler:&mut TimerScheduler<EchoCmd>,emitter:&mut Emitter<EchoCmd>) {
         match cmd {
             EchoCmd::EchoEmpty => {}
             EchoCmd::EchoMsg(count, start) => {
@@ -54,5 +55,20 @@ impl Actor<EchoCmd, EchoCmd> for Echo {
                 emitter.emit(&EchoCmd::EchoMsg(0, Instant::now().as_millis()));
             }
         }
+    }
+}
+use core::pin::Pin;
+use core::task::Context;
+use core::task::Waker;
+use futures::Future;
+static mut WAKER : Option<Waker> = None;
+
+impl Future for Echo {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        unsafe { WAKER = Some(cx.waker().clone());};
+        let mut this = self.get_mut();
+            Poll::Pending
     }
 }

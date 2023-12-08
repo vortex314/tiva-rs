@@ -1,6 +1,6 @@
 use core::cell::RefCell;
-use core::pin::Pin;
 use core::pin::pin;
+use core::pin::Pin;
 use core::task::Context;
 use core::task::Poll;
 use core::task::Waker;
@@ -28,12 +28,10 @@ use embassy_time::Duration;
 use embassy_time::Timer;
 
 #[derive(Debug, Clone, Default)]
-
 pub enum ButtonCmd {
     #[default]
     Init,
-    Open,
-    Close
+    Changed,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,30 +41,41 @@ pub enum ButtonEvent {
     Pressed,
 }
 
-struct ButtonState {
+struct ButtonState {}
+
+static mut IRQ_SENDER: Option<Emitter<ButtonEvent>> = None;
+pub struct Button {
     pressed: bool,
     pin: Box<dyn InputPin<Error = ()>>,
-}
-
-static BUTTON_WAKER: AtomicWaker = AtomicWaker::new();
-static mut BUTTON_STATE: Option<Box<dyn InputPin<Error = ()>>> = None;
-pub struct Button {
-    state: ButtonState,
 }
 
 impl Button {
     pub fn new(pin: impl InputPin<Error = ()> + 'static) -> Self {
         let reg = WakerRegistration::new();
         Button {
-            state: ButtonState {
-                pressed: false,
-                pin: Box::new(pin),
-            }
+            pressed: false,
+            pin: Box::new(pin),
         }
     }
 }
 
-impl Actor<ButtonCmd,ButtonEvent> for Button {
+impl Future for Button {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.get_mut();
+        this.pressed = ! this.pressed;
+
+        if this.pressed  {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+
+impl Actor<ButtonCmd, ButtonEvent> for Button {
     fn init(&mut self, scheduler: &mut TimerScheduler<ButtonCmd>) {
         info!("Button init");
         let p = unsafe { tm4c123x::Peripherals::steal() };
@@ -74,11 +83,18 @@ impl Actor<ButtonCmd,ButtonEvent> for Button {
         let mut portf = p.GPIO_PORTF.split(&sysctl.power_control);
         let mut switch1 = portf.pf4.into_pull_up_input();
         switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);
-        unsafe {
-            BUTTON_STATE = Some(Box::new(switch1));
-        }
     }
-    fn on(&mut self, cmd: &ButtonCmd, scheduler: &mut TimerScheduler<ButtonCmd>, emitter: &mut dyn Publisher<ButtonEvent>) {
+    fn on(
+        &mut self,
+        cmd: &ButtonCmd,
+        scheduler: &mut TimerScheduler<ButtonCmd>,
+        emitter: &mut Emitter<ButtonEvent>,
+    ) {
+        /*unsafe {
+            if IRQ_SENDER.is_none() {
+                IRQ_SENDER = Some(*emitter);
+            };
+        };*/
         match cmd {
             ButtonCmd::Init => {
                 let p = unsafe { tm4c123x::Peripherals::steal() };
@@ -86,20 +102,17 @@ impl Actor<ButtonCmd,ButtonEvent> for Button {
                 let mut portf = p.GPIO_PORTF.split(&sysctl.power_control);
                 let mut switch1 = portf.pf4.into_pull_up_input();
                 switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);
-                unsafe {
-                    BUTTON_STATE = Some(Box::new(switch1));
+            }
+            ButtonCmd::Changed => {
+                if self.pin.is_low().unwrap() {
+                    emitter.emit(&ButtonEvent::Pressed);
+                } else {
+                    emitter.emit(&ButtonEvent::Released);
                 }
-            }
-            ButtonCmd::Open => {
-                emitter.emit(&ButtonEvent::Released);
-            }
-            ButtonCmd::Close => {
-                emitter.emit(&ButtonEvent::Pressed)
             }
         }
     }
 }
-
 
 // interrupt handler wake ButtonActor
 static mut GPIOF_INTERRUPTS: u32 = 1000;
@@ -110,7 +123,7 @@ fn GPIOF() {
     let mut portf = p.GPIO_PORTF.split(&p.SYSCTL.power_control);
     let mut switch1 = portf.pf4.into_pull_up_input();
     switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);*/
-// steal periheral
+    // steal periheral
     let p = unsafe { tm4c123x::Peripherals::steal() };
     let mut sysctl = p.SYSCTL.constrain();
     let mut portf = p.GPIO_PORTF.split(&sysctl.power_control);
@@ -119,8 +132,17 @@ fn GPIOF() {
     hprintln!("GPIOF interrupt");
     unsafe {
         GPIOF_INTERRUPTS += 1;
+
+        if switch1.is_low().unwrap() {
+            hprintln!("GPIOF interrupt low");
+            if let Some(emitter) = &IRQ_SENDER {
+                emitter.emit(&ButtonEvent::Pressed);
+            }
+        } else {
+            hprintln!("GPIOF interrupt high");
+            if let Some(emitter) = &IRQ_SENDER {
+                emitter.emit(&ButtonEvent::Released);
+            }
+        }
     }
-
-//    BUTTON_WAKER.wake();
 }
-

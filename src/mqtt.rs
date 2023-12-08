@@ -3,7 +3,7 @@ enum MqttEvent {
     #[default]
     Connected,
     Disconnected,
-    Message(String, Vec<u8>),
+    Publish(String, Vec<u8>),
 }
 
 #[derive(Debug, Clone, Default)]

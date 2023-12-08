@@ -16,527 +16,164 @@ use {
 #[cfg(feature = "embassy")]
 use {alloc::boxed::Box, alloc::rc::Rc, alloc::vec::Vec, embassy_futures::block_on};
 
-use core::ops::Shr;
-use core::{cell::RefCell, mem};
+use core::{cell::RefCell, default, mem};
+use core::{
+    ops::Shr,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
+use alloc::sync::Arc;
 use embassy_futures::select::*;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel, pubsub::publisher::Pub};
-use embassy_time::{with_timeout, Duration, Instant, TimeoutError, Timer};
+use embassy_time::{with_timeout, Duration, Instant, TimeoutError};
+use futures::Future;
 use log::{info, warn};
-use mini_io_queue::asyncio;
-use mini_io_queue::asyncio::queue;
-use mini_io_queue::storage::HeapBuffer;
 
-// led.actor.timers.set_interval(LedCmd::TimerBlink, Duration::from_millis(1000));
-// led.actor.timers.set_alarm(LedCmd::TimerBlink, Instant::now() + Duration::from_millis(1000));
-// actorref = Rc<RefCell< Publisher + Listener >>
-// Sink = Listener
-// Source = Publisher
-// Led = { Sink }, Button = { Source }
-// a >> func >> b
-// actor.timer_scheduler.set_interval(LedCmd::TimerBlink, Duration::from_millis(1000));
-// led.handle(LedCmd::Blink(200))
-// Led : Listener<LedCmd>, Publisher<LedEvent>
-// button.event >> transform(|x| { Pressed => Blink(100)}) >> led.cmd
-/*
-use alloc::string::{String, ToString};
-use serde::Serialize;
-use serde::Deserialize;
-enum MqttCmd<'a> {
-    Publish(String,String),
-    Rxd(dyn Deserialize<'a>),
-    Connect,
-    Disconnect,
+trait Sink<T> {
+    fn on(&mut self, value: &T);
 }
 
-enum MqttEvent {
-    Publish(String,String),
-    Txd(dyn Serialize),
-    Connected,
-    Disconnected,
+trait Source<T> {
+    fn add_listener(&mut self, listener: Box<dyn Sink<T>>) -> usize;
+    fn remove_listener(&mut self, listener_id: usize);
+    fn emit(&mut self, value: &T);
 }
 
-enum MqttTimer {
-    LoopbackTimer
-}
-struct MqttActor<'a> { // }: Listener<MqttCmd> + Publisher<MqttEvent> + Listener<MqttTimer> {
-    cmd : dyn Listener<MqttCmd<'a>>,
-    timer : dyn Listener<MqttTimer>,
-    event : dyn Publisher<MqttEvent>
+trait Flow<T, U>: Sink<T> + Source<U> {}
+
+trait Runner {
+    fn run(&mut self);
 }
 
-impl Listener<MqttCmd<'_>> for MqttActor {
-    fn on(&mut self,cmd:MqttCmd) {
-        match cmd {
-            MqttCmd::Publish(topic,value) => { self.emit(["pub",topic.to_string(),value.to_string()])},
-            _ => {}
-        }
-    }
-}
-
-//
-
-trait Actor<CMD,EVENT,TIMER_EVENT> : Listener<CMD> + Publisher<EVENT> + Listener<TIMER_EVENT> {
-    fn init(&mut self,wrapper : &mut ActorWrapper<CMD, EVENT,TIMER_EVENT>);
-    fn on(&mut self, cmd: &CMD,wrapper : &mut ActorWrapper<CMD, EVENT,TIMER_EVENT>) ;
-    fn on_timer(&mut self, cmd: &TIMER_EVENT,wrapper : &mut ActorWrapper<CMD, EVENT,TIMER_EVENT>) ;
-}
-*/
-
-use nb::block;
-//use tm4c123x_hal::pwm::Timer;
-
+type Callback = dyn FnMut() -> () + 'static;
 #[derive(Debug, Clone, Default)]
-pub enum NoEvent {
+enum TimerType {
     #[default]
-    Zero = 0,
+    Undefined,
+    Interval,
+    Gated,
+    Once,
 }
-#[derive(Debug, Clone, Default)]
-pub enum NoCmd {
-    #[default]
-    Zero = 0,
-}
-pub trait Listener<T> {
-    fn on(&self, value: &T);
-}
-pub trait Publisher<T> {
-    fn add_listener(&mut self, listener: Box<dyn Listener<T>>);
-    fn remove_listener(&mut self, listener: &Box<dyn Listener<T>>);
-    fn emit(&self, value: &T);
-}
-
-
-pub trait Actor<CMD, EVENT> {
-    fn init(&mut self, wrapper: &mut TimerScheduler<CMD>);
-    fn on(&mut self, cmd: &CMD, scheduler: &mut TimerScheduler<CMD>,publisher:&mut dyn Publisher<EVENT>);
-}
-
-fn compare_box<T: ?Sized>(left: &Box<T>, right: &Box<T>) -> bool {
-    let left: *const T = left.as_ref();
-    let right: *const T = right.as_ref();
-    left == right
-}
-
-#[derive(Debug, Clone, PartialEq, Copy)]
-struct ClockEntry<CMD> {
+struct Timer {
+    func: Callback,
     expires_at: Instant,
     interval: Duration,
-    cmd: CMD,
-    repeat: bool,
+    timer_type: TimerType,
 }
-
-pub struct TimerScheduler<CMD> {
-    clock_entries: Vec<ClockEntry<CMD>>,
-    next_alarm: Option<ClockEntry<CMD>>,
-}
-
-impl<CMD> TimerScheduler<CMD>
-where
-    CMD: Clone + Default,
-{
-    fn new() -> TimerScheduler<CMD> {
-        TimerScheduler {
-            clock_entries: Vec::new(),
-            next_alarm: None,
+impl Timer {
+    fn new(func: Callback) -> Self {
+        Timer {
+            func,
+            expires_at: Instant::MAX,
+            interval: Duration::MAX,
+            timer_type: TimerType::Undefined,
         }
     }
-    pub fn set_alarm(&mut self, cmd: CMD, clock: Instant) {
-        info!("set_alarm {} ", clock.as_millis());
-        self.clock_entries.push(ClockEntry {
-            expires_at: clock,
-            cmd,
-            interval: Duration::from_millis(10),
-            repeat: false,
-        });
-        self.next_alarm = self.next_alarm();
+    fn set_alarm(&mut self, time: Instant) {
+        self.expires_at = time;
+        self.timer_type = TimerType::Once;
     }
-
-    pub fn interval_timer(&mut self, cmd: CMD, interval: Duration) {
-        info!("set_interval {} ", interval.as_millis());
-        self.clock_entries.push(ClockEntry {
-            expires_at: Instant::now() + interval,
-            interval,
-            cmd,
-            repeat: true,
-        });
-        self.next_alarm = self.next_alarm();
+    fn interval_timer(&mut self, interval: Duration) {
+        self.expires_at = Instant::now() + interval;
+        self.interval = interval;
+        self.timer_type = TimerType::Interval;
     }
-
-    // set timer to send cmd after delay
-
-    pub fn cancel_timer(&mut self, cmd: CMD) {
-        let mut i = 0;
-        while i < self.clock_entries.len() {
-            if mem::discriminant(&self.clock_entries[i].cmd) == mem::discriminant(&cmd) {
-                self.clock_entries.remove(i);
-            } else {
-                i += 1;
+    fn gated_timer(&mut self, interval: Duration) {
+        self.expires_at = Instant::now() + interval;
+        self.interval = interval;
+        self.timer_type = TimerType::Gated;
+    }
+    fn cancel(&mut self) {
+        self.expires_at = Instant::MAX;
+        self.timer_type = TimerType::Undefined;
+    }
+    fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
+    fn is_set(&self) -> bool {
+        self.expires_at != Instant::MAX
+    }
+    fn is_undefined(&self) -> bool {
+        self.timer_type == TimerType::Undefined
+    }
+    fn is_interval(&self) -> bool {
+        self.timer_type == TimerType::Interval
+    }
+    fn is_gated(&self) -> bool {
+        self.timer_type == TimerType::Gated
+    }
+    fn is_once(&self) -> bool {
+        self.timer_type == TimerType::Once
+    }
+    fn handle_timeout(&mut self) {
+        match self.timer_type {
+            TimerType::Interval => {
+                self.expires_at += self.interval;
             }
-        }
-        self.next_alarm = self.next_alarm();
-    }
-
-    fn next_alarm(&self) -> Option<ClockEntry<CMD>> {
-        let mut min = Instant::now() + Duration::from_millis(1000000);
-        let mut clock_entry: Option<ClockEntry<CMD>> = None;
-        for entry in self.clock_entries.iter() {
-            if entry.expires_at < min {
-                info!(
-                    "next_alarm [{}] {} ",
-                    self.clock_entries.len(),
-                    entry.expires_at.as_millis()
-                );
-                min = entry.expires_at;
-                let ec = entry;
-                clock_entry = Some((*ec).clone());
+            TimerType::Gated => {
+                self.expires_at += self.interval;
             }
-        }
-        clock_entry
-    }
-
-    fn handle_timeout(&mut self) -> Vec<CMD> {
-        info!("handle_timeout()");
-        let mut timeouts: Vec<CMD> = Vec::new();
-        let mut i = 0;
-        while i < self.clock_entries.len() {
-            info!("handle_timeout() index [{}]", i);
-            if self.clock_entries[i].expires_at <= Instant::now() {
-                timeouts.push(self.clock_entries[i].cmd.clone());
-                if self.clock_entries[i].repeat {
-                    let interval = self.clock_entries[i].interval;
-                    self.clock_entries[i].expires_at += interval;
-                } else {
-                    self.clock_entries.remove(i);
-                }
-            } else {
-                i += 1;
+            TimerType::Once => {
+                self.expires_at = Instant::MAX;
             }
+            TimerType::Undefined => {}
         }
-        self.next_alarm = self.next_alarm();
-        timeouts
+        (self.func)();
     }
 }
 
-pub struct Emitter<EVENT> {
-    listeners: Vec<Box<dyn Listener<EVENT>>>,
+use embedded_hal::digital::v2::OutputPin;
+enum LedCmd {
+    On,
+    Off,
+    Blink(u32),
+}
+struct Led {
+    state: bool,
+    pin: Box<dyn OutputPin<Error = ()>>,
+    timer: Option<Timer>,
+    queue: Vec<LedCmd>,
 }
 
-impl<EVENT> Emitter<EVENT> {
-    fn new() -> Emitter<EVENT> {
-        Emitter {
-            listeners: Vec::new(),
+impl Led {
+    pub fn new(pin: impl OutputPin + 'static) -> Self {
+        Led {
+            state: false,
+            timer: None,
+            pin: Box::new(pin),
+            queue: Vec::new(),
         }
     }
-}
-
-impl<EVENT> Publisher<EVENT> for Emitter<EVENT> {
-    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) {
-        self.listeners.push(listener);
-    }
-    fn remove_listener(&mut self, listener: &Box<dyn Listener<EVENT>>) {
-        self.listeners.retain(|x| compare_box(x, listener) == false);
-    }
-    fn emit(&self, value: &EVENT) {
-        for listener in self.listeners.iter() {
-            listener.on(value);
-        }
-    }
-}
-
-pub struct ActorWrapper<CMD, EVENT> {
-    actor: Box<dyn Actor<CMD, EVENT>>,
-    emitter: Emitter<EVENT>,
-    channel: channel::Channel<NoopRawMutex, CMD, 3>,
-    timer_scheduler: TimerScheduler<CMD>,
-}
-
-impl<CMD, EVENT> ActorWrapper<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    fn new(actor: Box<dyn Actor<CMD, EVENT>>, capacity: usize) -> ActorWrapper<CMD, EVENT> {
-        // let (mut reader, mut writer) = queue(capacity);
-        let channel = channel::Channel::<NoopRawMutex, CMD, 3>::new();
-        let timer_scheduler = TimerScheduler::<CMD>::new();
-        ActorWrapper {
-            actor,
-            emitter: Emitter::new() ,
-            //        cmds_reader: r,
-            //        cmds_writer: s,
-            channel,
-            timer_scheduler: TimerScheduler::new(),
-        }
-    }
-
-    fn init(&mut self) {
-        self.actor.init(&mut self.timer_scheduler);
-    }
-
-    async fn recv(&mut self) -> CMD {
-        self.channel.receive().await
-    }
-    
-    
-    fn on(&mut self, cmd: &CMD) {
-        let res = self.channel.try_send(cmd.clone());
-        match res {
-            Ok(()) => {}
-            Err(_) => {
-                warn!("ActorWrapper::on() queue full");
-            }
-        }
-    }
-
-    // find next alarm entry
-    // if clock is in the past, send cmd and remove entry
-    // if clock is in the future, wait for clock and repeat
-    // if no entry, wait forever
-    async fn process_message(&mut self) {
-        let cmd = self.recv().await;
-        self.actor.on(&cmd, &mut self.timer_scheduler,&mut self.emitter);
-    }
-    async fn run(&mut self) {
-        let mut buf = [CMD::default(); 1];
-        match &self.timer_scheduler.next_alarm {
-            Some(clock_entry) => {
-                if clock_entry.expires_at <= Instant::now() {
-                    // clock passed
-                    self.timer_scheduler
-                        .handle_timeout()
-                        .iter()
-                        .for_each(|cmd| self.on(cmd));
-                } else {
-                    let timeout = clock_entry.expires_at - Instant::now();
-                    let res = with_timeout(timeout, self.process_message()).await;
-                    match res {
-                        Err(TimeoutError) => {
-                            self.timer_scheduler
-                                .handle_timeout()
-                                .iter()
-                                .for_each(|cmd| self.on(cmd));
+    pub fn init(&mut self ) {
+        self.timer = Some(Timer::new(|x| {
+            for cmd in x.queue.iter() {
+                match cmd {
+                    LedCmd::On => {
+                        x.pin.set_high();
+                        x.state = true;
+                    }
+                    LedCmd::Off => {
+                        x.pin.set_low();
+                        x.state = false;
+                    }
+                    LedCmd::Blink(intv) => {
+                        if x.state {
+                            x.pin.set_low();
+                            x.state = false;
+                        } else {
+                            x.pin.set_high();
+                            x.state = true;
                         }
-                        Ok(()) => {}
+                        x.timer.as_mut().unwrap().interval_timer(Duration::from_millis(*intv as u64));
                     }
                 }
             }
-            None => {
-                self.process_message().await;
-            }
-        }
+            info!("Led timer");
+        }));
     }
 }
 
-pub struct ActorRef<CMD, EVENT> {
-    actor_wrapper: Rc<RefCell<ActorWrapper<CMD, EVENT>>>,
+impl Sink<LedCmd> for Led {
+    fn on(&mut self, value: &LedCmd) {}
 }
-
-impl<CMD, EVENT> ActorRef<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    pub fn new(mut actor: Box<dyn Actor<CMD, EVENT>>, capacity: usize) -> ActorRef<CMD, EVENT> {
-        ActorRef {
-            actor_wrapper: Rc::new(RefCell::new(ActorWrapper::new(actor, 3))),
-        }
-    }
-
-    pub fn tell(&self, cmd: &CMD) {
-        let _ = self.actor_wrapper.borrow().channel.try_send(cmd.clone());
-    }
-
-    pub async fn run(&self) {
-        self.actor_wrapper.borrow_mut().run().await;
-    }
-
-    fn add_listener(&self, listener: Box<dyn Listener<EVENT>>) {
-        self.actor_wrapper.borrow_mut().emitter.add_listener(listener);
-    }
-
-    fn remove_listener(&self, listener: &Box<dyn Listener<EVENT>>) {
-        self.actor_wrapper.borrow_mut().emitter.remove_listener(listener);
-    }
-    fn emit(&self, value: &EVENT) {
-        self.actor_wrapper.borrow().emitter.emit(value);
-    }
-}
-
-impl<CMD, EVENT> Listener<CMD> for ActorRef<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    fn on(&self, value: &CMD) {
-        self.tell(value);
-    }
-}
-
-
-impl<'a, T, U, V> Shr<ActorRef<U, V>> for ActorRef<T, U>
-where
-    T: Clone + Default + 'static,
-    U: Clone + Default + 'static,
-    V: Clone + Default + 'static,
-{
-    type Output = ActorRef<U, V>;
-
-    fn shr(self, rhs: ActorRef<U, V>) -> Self::Output {
-        self.add_listener(Box::new(rhs.clone()));
-        rhs
-    }
-}
-
-impl<CMD, EVENT> Clone for ActorRef<CMD, EVENT> {
-    fn clone(&self) -> Self {
-        ActorRef {
-            actor_wrapper: Rc::clone(&self.actor_wrapper),
-        }
-    }
-}
-
-//======================  Handler  ======================
-
-pub struct Mapper<CMD, EVENT> {
-    func: fn(&CMD) -> Option<EVENT>,
-    emitter: Emitter<EVENT>,
-}
-
-impl<CMD, EVENT> Clone for Mapper<CMD, EVENT> {
-    fn clone(&self) -> Self {
-        Mapper {
-            func: self.func,
-            emitter: Emitter::new(),
-        }
-    }
-}
-
-impl<EVENT, CMD> Mapper<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    pub fn new(func: fn(&CMD) -> Option<EVENT>) -> Self {
-        Mapper {
-            func,
-            emitter: Emitter::new(),
-        }
-    }
-    fn add_listener(&mut self, listener: Box<dyn Listener<EVENT>>) {
-        self.emitter.add_listener(listener);
-    }
-
-    fn remove_listener(&mut self, listener: &Box<dyn Listener<EVENT>>) {
-        self.emitter.remove_listener(listener);
-    }
-    fn emit(&self, value: &EVENT) {
-        self.emitter.emit(value);
-    }
-}
-
-impl<CMD, EVENT> Listener<CMD> for Mapper<CMD, EVENT>
-where
-    CMD: Clone + Default,
-    EVENT: Clone + Default,
-{
-    fn on(&self, cmd: &CMD) {
-        (self.func)(cmd).map(|e| self.emit(&e));
-    }
-}
-
-//======================  Actor >> Handler >> ... ======================
-
-impl<'a, T, U, V> Shr<&'a Mapper<U, V>> for &'a ActorRef<T, U>
-where
-    T: Clone + Default + 'static,
-    U: Clone + Default + 'static,
-    V: Clone + Default + 'static,
-{
-    type Output = &'a Mapper<U, V>;
-
-    fn shr(self, rhs: &'a Mapper<U, V>) -> Self::Output {
-        self.add_listener(Box::new(rhs.clone()));
-        rhs
-    }
-}
-//======================  Handler >> Actor >> ... ======================
-
-impl<'a, T, U, V> Shr<&'a ActorRef<U, V>> for &'a mut Mapper<T, U>
-where
-    T: Clone + Default + 'static,
-    U: Clone + Default + 'static,
-    V: Clone + Default + 'static,
-{
-    type Output = &'a ActorRef<U, V>;
-
-    fn shr(self, rhs: &'a ActorRef<U, V>) -> Self::Output {
-        self.add_listener(Box::new(rhs.clone()));
-        rhs
-    }
-}
-//====================== Sink ======================
-
-pub struct Sink<F, CMD>
-where
-    F: Fn(&CMD),
-{
-    func: Box<F>,
-    phantom: core::marker::PhantomData<CMD>,
-}
-impl<F, CMD> Sink<F, CMD>
-where
-    CMD: Clone + Default,
-    F: Fn(&CMD),
-{
-    pub fn new(func: F) -> Self {
-        Sink {
-            func: Box::new(func),
-            phantom: core::marker::PhantomData,
-        }
-    }
-}
-
-/*impl<CMD> Clone for Sink<CMD> {
-    fn clone(&self) -> Self {
-        Sink { func: self.func }
-    }
-}*/
-
-impl<F, CMD> Listener<CMD> for Sink<F, CMD>
-where
-    CMD: Clone + Default,
-    F: Fn(&CMD),
-{
-    fn on(&self, cmd: &CMD) {
-        (self.func)(cmd);
-    }
-}
-
-//======================  Actor >> Sink ======================
-
-impl<'a, T, U, F> Shr<Sink<F, U>> for &'a mut ActorRef<T, U>
-where
-    T: Clone + Default + 'static,
-    U: Clone + Default + 'static,
-    F: Fn(&U) + 'static,
-{
-    type Output = ();
-
-    fn shr(self, rhs: Sink<F, U>) -> Self::Output {
-        self.add_listener(Box::new(rhs));
-    }
-}
-
-/*
-fn filter<T>(value: &T) -> Mapper<T, T>
-where
-    T: Clone + Default + 'static,
-{
-    Mapper::new(|v| {
-        if v == value {
-            Some(v.clone())
-        } else {
-            None
-        }
-    })
-}*/
