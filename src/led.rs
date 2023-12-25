@@ -2,11 +2,12 @@ use crate::limero::*;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::sync::Arc;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::channel::DynamicSender;
 use embassy_time::Instant;
 use embedded_hal::digital::OutputPin;
 use futures::Future;
 
-use core::borrow::BorrowMut;
 use core::cell::RefCell;
 use core::pin::Pin;
 use core::task::Context;
@@ -16,110 +17,77 @@ use embassy_time::Duration;
 use embassy_time::Timer;
 //use embassy_futures::join::join;
 use embassy_futures::select::select;
+use embassy_sync::channel::Channel;
+use embassy_sync::channel::{self, Receiver, Sender};
 use log::info;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub enum LedCmd {
-    #[default]
     On,
     Off,
     Blink(u32),
-    TimerBlink,
 }
 pub struct Led {
+    channel: Rc<RefCell<Channel<NoopRawMutex, LedCmd, 3>>>,
     state: LedCmd,
     interval_ms: u64,
     pin: Box<dyn OutputPin>,
     pin_high: bool,
-    scheduler: Option<Rc<TimerScheduler<LedCmd>>>,
+    scheduler: TimerScheduler,
 }
 
 impl Led {
-    pub fn new(pin: impl OutputPin + 'static) -> Self {
+    pub fn new(pin: impl OutputPin + 'static, capacity: usize) -> Self {
         Led {
+            channel:Rc::new(RefCell::new(Channel::<NoopRawMutex, LedCmd, 3>::new())),
             state: LedCmd::On,
             interval_ms: 100,
             pin: Box::new(pin),
             pin_high: false,
-            scheduler:None,
+            scheduler: TimerScheduler::new(),
         }
     }
-}
-
-impl Actor<LedCmd, NoEvent> for Led {
-    fn init(&mut self, scheduler: Rc<TimerScheduler<LedCmd>>) {
-        info!("Led init");
-        self.pin.set_high();
-        self.pin_high = true;
-        self.state = LedCmd::On;
-        self.scheduler = Some(Rc::clone(&scheduler));
-        self.scheduler.unwrap().borrow_mut().interval_timer(LedCmd::TimerBlink, Duration::from_millis(1000));
-
-    }
-    fn on(
-        &mut self,
-        cmd: &LedCmd,
-        scheduler: &mut TimerScheduler<LedCmd>,
-        publisher: &mut Emitter<NoEvent>,
-    ) {
-        info!("Led cmd {:?}", cmd);
-        self.state = cmd.clone();
-        match cmd {
-            LedCmd::On => {
-                self.pin.set_high();
-                self.pin_high = true;
-            }
-            LedCmd::Off => {
-                self.pin.set_low();
-                self.pin_high = false;
-            }
-            LedCmd::Blink(intv) => {
-                scheduler.set_alarm(
-                    LedCmd::TimerBlink,
-                    Instant::now() + Duration::from_millis(*intv as u64),
-                );
-                self.interval_ms = *intv as u64;
-            }
-            LedCmd::TimerBlink => {
-                if let LedCmd::Blink(x) = self.state {
-                    if self.pin_high {
-                        self.pin.set_low();
-                        self.pin_high = false;
-                    } else {
-                        self.pin.set_high();
-                        self.pin_high = true;
-                    }
+    pub async fn run(&mut self) {
+        info!("Led run");
+        loop {
+            let cmd = self.channel.borrow().receiver().receive().await;
+            info!("Led run {:?}", cmd);
+            match cmd {
+                LedCmd::On => {
+                    self.pin.set_high();
+                    self.pin_high = true;
+                }
+                LedCmd::Off => {
+                    self.pin.set_low();
+                    self.pin_high = false;
+                }
+                LedCmd::Blink(intv) => {
+                    self.interval_ms = intv as u64;
                 }
             }
         }
     }
+}
 
-    async fn wait_for_cmd() -> LedCmd {
-        unsafe {
-            let waker = WAKER.as_ref().unwrap().clone();
-            let mut led = Led::new();
-            let mut led = Pin::new_unchecked(&mut led);
-            let mut ctx = Context::from_waker(&waker);
-            loop {
-                if let Poll::Ready(cmd) = led.as_mut().poll(&mut ctx) {
-                    return cmd;
-                }
-                cortex_m::asm::wfi();
+impl Handler<LedCmd> for Led {
+    fn handle(&self, cmd: LedCmd) {
+        let sender = self.channel.borrow().try_send(cmd.clone());
+    }
+}
+
+impl Sink<LedCmd> for Led {
+    fn handler(&self) -> Box<dyn Handler<LedCmd>> {
+        struct LedHandler {
+            channel: Rc<RefCell<Channel<NoopRawMutex,LedCmd,3>>>,
+        }
+        impl<'a> Handler<LedCmd> for LedHandler {
+            fn handle(&self, cmd: LedCmd) {
+                let _ = self.channel.borrow_mut().try_send(cmd.clone());
             }
         }
-    }
-
-}
-
-static mut WAKER : Option<Waker> = None;
-
-impl Future for Led {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        unsafe { WAKER = Some(cx.waker().clone());};
-        let mut this = self.get_mut();
-
-            Poll::Pending
+        Box::new(LedHandler {
+            channel: self.channel.clone(),
+        })
     }
 }
+

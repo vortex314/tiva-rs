@@ -14,7 +14,7 @@ extern crate alloc;
 
 use core::cell::RefCell;
 use core::default;
-use core::pin::{Pin, pin};
+use core::pin::{pin, Pin};
 use core::task::{Context, Poll};
 
 use alloc::borrow;
@@ -59,8 +59,6 @@ use semi_logger::*;
 mod timer_driver;
 use timer_driver::Clock;
 mod serial_logger;
-mod topic_router;
-use topic_router::*;
 
 use embassy_executor::Executor;
 // use serial_logger::serial_logger_init;
@@ -141,52 +139,36 @@ async fn main(spawner: Spawner) {
     pin_uext1.set_low();
     pin_uext2.set_low();
     */
-    let mut button = &ActorRef::new(Box::new(Button::new(switch1)), 0);
-    let mut button2 = &ActorRef::new(Box::new(Button::new(switch2)), 0);
-
-    let mut led_red = &ActorRef::new(Box::new(Led::new(pin_red)), 3);
-    let mut led_blue = &ActorRef::new(Box::new(Led::new(pin_blue)), 3);
-    let mut led_green = &ActorRef::new(Box::new(Led::new(pin_green)), 3);
-
-    let mut pressed_led_on = &Mapper::new(|x| match x {
-        ButtonEvent::Pressed => Some(LedCmd::Blink(500)),
-        ButtonEvent::Released => Some(LedCmd::Blink(50)),
+    let mut pressed_led_on = Mapper::new(move |x| match x {
+        ButtonEvent::Pressed => LedCmd::Blink(500),
+        ButtonEvent::Released => LedCmd::Blink(50),
     });
-    let mut log_button = Sink::new(|x| match x {
-        ButtonEvent::Pressed => info!("button pressed"),
-        ButtonEvent::Released => info!("button released"),
-    });
+    {
+        let mut button_1 = Button::new(switch1);
+        let mut button_2 = Button::new(switch2);
 
-    let led_blue_clone = led_blue.clone();
+        let mut led_red = Led::new(pin_red, 1);
+        let mut led_blue = Led::new(pin_blue, 1);
+        let mut led_green = Led::new(pin_green, 1);
 
-    let mut log_button2 = Sink::new(move |x| match x {
-        ButtonEvent::Pressed => led_blue_clone.on(&LedCmd::Blink(100)),
-        ButtonEvent::Released => led_blue_clone.on(&LedCmd::Blink(1000)),
-    });
+        /*let mut log_button = Sink::new(|x| match x {
+            ButtonEvent::Pressed => info!("button pressed"),
+            ButtonEvent::Released => info!("button released"),
+        });*/
+        unsafe {
+            cortex_m::interrupt::enable();
+        };
 
-    let mut pressed2_led_on = &Mapper::new(|x| match x {
-        ButtonEvent::Pressed => Some(LedCmd::On),
-        ButtonEvent::Released => Some(LedCmd::Off),
-    });
+        let mapper2 = pressed_led_on.clone();
 
-    unsafe {
-        cortex_m::interrupt::enable();
-    };
+        pressed_led_on.add_handler(led_red.handler());
+        button_1.add_handler(Box::new(pressed_led_on));
+        link(&mut button_1, &mapper2);
+        //link(&mut button_2, & pressed_led_on);
 
-    // button.via(&mut pressed_led_on).via(&mut log_button);
-    button >> log_button;
-    button2 >> log_button2;
-    let _x = button2
-        >> &mapper(|x| match x {
-            ButtonEvent::Pressed => Some(LedCmd::On),
-            ButtonEvent::Released => Some(LedCmd::Off),
-        })
-        >> led_green;
-    let _y = button2 >> pressed2_led_on >> led_green;
-    let _z = button >> pressed_led_on >> led_red;
-    info!("main loop started");
-    embassy_futures::select::select4(button, led_red, button2, led_green)
-        .await;
+        info!("main loop started");
+        embassy_futures::select::select(led_blue.run(), led_green.run()).await;
+    }
     warn!("Stopped. Shouldn't have happened");
 }
 

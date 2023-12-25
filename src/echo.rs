@@ -1,74 +1,79 @@
 use crate::limero::*;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use embassy_sync::channel;
 use embassy_time::Instant;
 use embedded_hal::digital::OutputPin;
 
+use crate::timer_driver::msec;
 use core::cell::RefCell;
+use core::f32::consts::E;
+use core::marker::PhantomData;
 use core::task::Poll;
+use embassy_futures::select::select;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_sync::channel::Receiver;
+use embassy_sync::channel::Sender;
 use embassy_time::Duration;
 use embassy_time::Timer;
-//use embassy_futures::join::join;
-use crate::timer_driver::msec;
-use embassy_futures::select::select;
 use log::info;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub enum EchoCmd {
-    #[default]
-    EchoEmpty,
     EchoMsg(u32, u64),
-    EchoTimer,
 }
 
-pub struct Echo {
+pub struct Echo<> {
     max_count: u32,
     start_time: u64,
+    channel: Channel<NoopRawMutex, EchoCmd, 3>,
+    emitter: Emitter<EchoCmd>,
+    p: PhantomData<()>,
 }
 
 impl Echo {
     pub fn new(max_count: u32) -> Self {
+        let channel = Channel::<NoopRawMutex, EchoCmd, 3>::new();
         Echo {
             max_count,
             start_time: msec(),
+            channel,
+            emitter: Emitter::new(),
+            p: PhantomData,
         }
     }
-}
 
-impl Actor<EchoCmd, EchoCmd> for Echo {
-    fn init(&mut self, scheduler:&mut TimerScheduler<EchoCmd>) {
-        info!("Echo init");
-        scheduler.set_alarm(EchoCmd::EchoTimer,Instant::now()+Duration::from_millis(1000));
+    pub fn handle(&self,cmd:&EchoCmd)  {
+        let sender = self.channel.try_send(cmd.clone());
     }
-    fn on(&mut self, cmd: &EchoCmd, _scheduler:&mut TimerScheduler<EchoCmd>,emitter:&mut Emitter<EchoCmd>) {
-        match cmd {
-            EchoCmd::EchoEmpty => {}
-            EchoCmd::EchoMsg(count, start) => {
-                if *count < self.max_count {
-                    emitter.emit(&EchoCmd::EchoMsg(count + 1, *start));
-                } else {
-                    let now = msec();
-                    info!("Echo {} ms", now - start);
+
+    pub async fn run(&mut self) {
+        loop {
+            Timer::after(Duration::from_millis(1000)).await;
+            self.emitter
+                .emit(EchoCmd::EchoMsg(0, Instant::now().as_millis() as u64));
+            let cmd = self.channel.receiver().receive().await;
+            match cmd {
+                EchoCmd::EchoMsg(count, ts) => {
+                    if count < self.max_count {
+                        let msg = EchoCmd::EchoMsg(count + 1, ts);
+                        self.emitter.emit(msg);
+                    } else {
+                        let delta = Instant::now().as_millis() as u64 - ts;
+                        info!("Echo done {} messages in {} ms", count, delta);
+                        info!("Echo done {} messages per second", count as u64  * 1000 / delta);
+                    }
                 }
             }
-            EchoCmd::EchoTimer => {
-                emitter.emit(&EchoCmd::EchoMsg(0, Instant::now().as_millis()));
-            }
         }
     }
 }
-use core::pin::Pin;
-use core::task::Context;
-use core::task::Waker;
-use futures::Future;
-static mut WAKER : Option<Waker> = None;
 
-impl Future for Echo {
-    type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        unsafe { WAKER = Some(cx.waker().clone());};
-        let mut this = self.get_mut();
-            Poll::Pending
+
+impl Source<EchoCmd> for Echo<> {
+    fn add_handler(&mut self, handler: Box<dyn Handler<EchoCmd>> ) {
+        self.emitter.add_handler(handler);
     }
 }
