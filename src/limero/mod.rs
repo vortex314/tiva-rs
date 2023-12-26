@@ -161,7 +161,7 @@ pub enum TimerCmd {
 
 /// a infinite duration u64::MAX/2
 const fn forever() -> Duration {
-    Duration::from_millis(u64::MAX / 2)
+    Duration::from_millis(1_000_000_000)
 }
 /// a infinite instant now() + DUration::from_millis(u64::MAX/2
 fn infinity() -> Instant {
@@ -269,7 +269,7 @@ impl TimerScheduler {
         }
     }
 
-    pub fn soonest(&self) -> Option<Instant> {
+    pub fn soonest(&self) -> Option<Duration> {
         let infinity = infinity();
         let mut soonest = infinity;
         for timer in self.timers.iter() {
@@ -281,8 +281,10 @@ impl TimerScheduler {
 
         if soonest == infinity {
             None
+        } else if soonest < Instant::now() {
+            None
         } else {
-            Some(soonest)
+            Some(soonest-Instant::now())
         }
     }
 }

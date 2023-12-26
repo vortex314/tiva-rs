@@ -116,6 +116,8 @@ async fn main(spawner: Spawner) {
     let mut pin_green = portf.pf3.into_push_pull_output();
     let mut switch2 = portf.pf0.unlock(&mut portf.control).into_pull_up_input();
     let mut switch1 = portf.pf4.into_pull_up_input();
+    let mut echo = Echo::new(100000);
+    echo.add_handler(echo.handler());
     switch1.set_interrupt_mode(gpio::InterruptMode::EdgeBoth);
     let mut reg = portf.control;
     unsafe {
@@ -167,7 +169,7 @@ async fn main(spawner: Spawner) {
         //link(&mut button_2, & pressed_led_on);
 
         info!("main loop started");
-        embassy_futures::select::select(led_blue.run(), led_green.run()).await;
+        embassy_futures::select::select(echo.run(),led_blue.run()).await;
     }
     warn!("Stopped. Shouldn't have happened");
 }

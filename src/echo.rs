@@ -24,10 +24,10 @@ pub enum EchoCmd {
     EchoMsg(u32, u64),
 }
 
-pub struct Echo<> {
+pub struct Echo {
     max_count: u32,
     start_time: u64,
-    channel: Channel<NoopRawMutex, EchoCmd, 3>,
+    channel: Rc<RefCell<Channel<NoopRawMutex, EchoCmd, 3>>>,
     emitter: Emitter<EchoCmd>,
     p: PhantomData<()>,
 }
@@ -38,22 +38,22 @@ impl Echo {
         Echo {
             max_count,
             start_time: msec(),
-            channel,
+            channel: Rc::new(RefCell::new(Channel::<NoopRawMutex, EchoCmd, 3>::new())),
             emitter: Emitter::new(),
             p: PhantomData,
         }
     }
 
-    pub fn handle(&self,cmd:&EchoCmd)  {
-        let sender = self.channel.try_send(cmd.clone());
+    pub fn handle(&self, cmd: &EchoCmd) {
+        let sender = self.channel.borrow().try_send(cmd.clone());
     }
 
     pub async fn run(&mut self) {
+        info!("Echo run");
+        self.emitter
+            .emit(EchoCmd::EchoMsg(0, Instant::now().as_millis() as u64));
         loop {
-            Timer::after(Duration::from_millis(1000)).await;
-            self.emitter
-                .emit(EchoCmd::EchoMsg(0, Instant::now().as_millis() as u64));
-            let cmd = self.channel.receiver().receive().await;
+            let cmd = self.channel.borrow().receiver().receive().await;
             match cmd {
                 EchoCmd::EchoMsg(count, ts) => {
                     if count < self.max_count {
@@ -62,7 +62,10 @@ impl Echo {
                     } else {
                         let delta = Instant::now().as_millis() as u64 - ts;
                         info!("Echo done {} messages in {} ms", count, delta);
-                        info!("Echo done {} messages per second", count as u64  * 1000 / delta);
+                        info!(
+                            "Echo done {} messages per second",
+                            count as u64 * 1000 / delta
+                        );
                     }
                 }
             }
@@ -70,10 +73,27 @@ impl Echo {
     }
 }
 
-
-
-impl Source<EchoCmd> for Echo<> {
-    fn add_handler(&mut self, handler: Box<dyn Handler<EchoCmd>> ) {
+impl Source<EchoCmd> for Echo {
+    fn add_handler(&mut self, handler: Box<dyn Handler<EchoCmd>>) {
         self.emitter.add_handler(handler);
+    }
+}
+
+impl Sink<EchoCmd> for Echo {
+    fn handler(&self) -> Box<dyn Handler<EchoCmd>> {
+        struct EchoHandler {
+            channel: Rc<RefCell<Channel<NoopRawMutex, EchoCmd, 3>>>,
+        }
+        impl<'a> Handler<EchoCmd> for EchoHandler {
+            fn handle(&self, cmd: EchoCmd) {
+                self.channel
+                    .borrow_mut()
+                    .try_send(cmd.clone())
+                    .expect("try_send failed ");
+            }
+        }
+        Box::new(EchoHandler {
+            channel: self.channel.clone(),
+        })
     }
 }

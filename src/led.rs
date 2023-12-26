@@ -1,10 +1,12 @@
 use crate::limero::*;
+use crate::limero::Timer as MyTimer;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::DynamicSender;
 use embassy_time::Instant;
+use embassy_time::with_timeout;
 use embedded_hal::digital::OutputPin;
 use futures::Future;
 
@@ -41,16 +43,35 @@ impl Led {
         Led {
             channel:Rc::new(RefCell::new(Channel::<NoopRawMutex, LedCmd, 3>::new())),
             state: LedCmd::On,
-            interval_ms: 100,
+            interval_ms: 1000,
             pin: Box::new(pin),
             pin_high: false,
             scheduler: TimerScheduler::new(),
         }
     }
+    fn toggle(&mut self) {
+        if self.pin_high {
+            self.pin.set_low();
+            self.pin_high = false;
+        } else {
+            self.pin.set_high();
+            self.pin_high = true;
+        }
+    }
     pub async fn run(&mut self) {
         info!("Led run");
+        self.scheduler.add_timer(MyTimer::interval(1,Instant::now()+Duration::from_millis(1000),Duration::from_millis(self.interval_ms)));
         loop {
-            let cmd = self.channel.borrow().receiver().receive().await;
+            let timeout_opt  = self.scheduler.soonest();
+            let timeout = timeout_opt.unwrap_or( Duration::from_millis(100));
+            info!("Led run to {:?} msec", timeout.as_millis() );
+            let cmd_opt =  with_timeout(timeout, self.channel.borrow().receiver().receive()).await;
+            if cmd_opt.is_err() { // timeout
+                self.toggle();
+                self.scheduler.reload();
+                continue;
+            }
+            let cmd = cmd_opt.unwrap();
             info!("Led run {:?}", cmd);
             match cmd {
                 LedCmd::On => {
