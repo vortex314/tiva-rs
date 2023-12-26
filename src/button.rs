@@ -34,34 +34,49 @@ pub enum ButtonEvent {
 }
 
 
-static mut IRQ_SENDER: Option<Emitter<ButtonEvent>> = None;
 pub struct Button {
     pressed: bool,
-    emitter: Emitter<ButtonEvent>,
-    pin: Box<dyn InputPin<Error = ()>>,
+    emitter: Rc<RefCell<Emitter<ButtonEvent>>>,
+ //   pin: Box<dyn InputPin<Error = ()>>,
 }
 
 impl Button {
-    pub fn new(pin: impl InputPin<Error = ()> + 'static) -> Self {
+    pub fn new(/*pin: impl InputPin<Error = ()> + 'static*/) -> Self {
         let reg = WakerRegistration::new();
         Button {
             pressed: false,
-            emitter: Emitter::new(),
-            pin: Box::new(pin),
+            emitter: Rc::new(RefCell::new(Emitter::new())),
+       //     pin: Box::new(pin),
         }
     }
     pub async fn run() {
         Timer::after(Duration::from_millis(u64::MAX)).await;
     }
+    pub fn emit(&mut self, event: ButtonEvent) {
+        self.emitter.borrow().emit(event);
+    }
 }
 
 impl  Source<ButtonEvent> for Button {
     fn add_handler(& mut self, handler: Box<dyn Handler<ButtonEvent>>) {
-        self.emitter.add_handler(handler);
+        self.emitter.borrow_mut().add_handler(handler);
     }
 }
 
-#[interrupt]
-fn GPIOF() {
-    
+impl Sink<ButtonEvent> for Button {
+    fn handler(&self) -> Box<dyn Handler<ButtonEvent>> {
+        struct ButtonHandler {
+            emitter: Rc<RefCell<Emitter<ButtonEvent>>>,
+        }
+        impl<'a> Handler<ButtonEvent> for ButtonHandler {
+            fn handle(&self, event: ButtonEvent) {
+                info!("ButtonHandler {:?}", event);
+                let _ = self.emitter.borrow().emit(event) ;
+            }
+        }
+        Box::new(ButtonHandler {
+            emitter: self.emitter.clone(),
+        })
+    }
 }
+

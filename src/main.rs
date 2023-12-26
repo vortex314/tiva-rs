@@ -12,7 +12,7 @@
 
 extern crate alloc;
 
-use core::cell::RefCell;
+use core::cell::{RefCell, UnsafeCell};
 use core::default;
 use core::pin::{pin, Pin};
 use core::task::{Context, Poll};
@@ -22,7 +22,7 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::{self, Vec};
-use cortex_m::interrupt;
+//use cortex_m::interrupt;
 use cortex_m::interrupt::enable;
 use cortex_m::peripheral::{nvic, NVIC};
 use cortex_m_rt::exception;
@@ -30,7 +30,9 @@ use cortex_m_rt::exception;
 use cortex_m_semihosting::nr::open::R;
 use embassy_sync::pubsub::publisher;
 use futures::Future;
+use hal::gpio::gpiof::{PF0, PF4};
 use tm4c123x::Interrupt;
+use tm4c_hal::gpio::{Input, PullUp};
 use tm4c_hal::{gpio, serial};
 
 use cortex_m_rt::ExceptionFrame;
@@ -146,8 +148,14 @@ async fn main(spawner: Spawner) {
         ButtonEvent::Released => LedCmd::Blink(50),
     });
     {
-        let mut button_1 = Button::new(switch1);
-        let mut button_2 = Button::new(switch2);
+        let mut button_1 = Button::new();
+        let mut button_2 = Button::new();
+        unsafe {
+            PF4_BUTTON = Some(UnsafeCell::new(switch1));
+            PF0_BUTTON = Some(UnsafeCell::new(switch2));
+            PF4_BUTTON_HANDLER = Some(UnsafeCell::new(button_1.handler()));
+            PF0_BUTTON_HANDLER = Some(UnsafeCell::new(button_2.handler()));
+        };
 
         let mut led_red = Led::new(pin_red, 1);
         let mut led_blue = Led::new(pin_blue, 1);
@@ -169,12 +177,58 @@ async fn main(spawner: Spawner) {
         //link(&mut button_2, & pressed_led_on);
 
         info!("main loop started");
-        embassy_futures::select::select(echo.run(),led_blue.run()).await;
+        embassy_futures::select::select(echo.run(), led_blue.run()).await;
     }
     warn!("Stopped. Shouldn't have happened");
 }
 
-//use alloc::fmt::format;
+use tm4c123x::interrupt;
+
+static mut PF0_BUTTON: Option<UnsafeCell<PF0<Input<PullUp>>>> = None;
+static mut PF4_BUTTON: Option<UnsafeCell<PF4<Input<PullUp>>>> = None;
+static mut PF0_BUTTON_HANDLER: Option<UnsafeCell<Box<dyn Handler<ButtonEvent>>>> = None;
+static mut PF4_BUTTON_HANDLER: Option<UnsafeCell<Box<dyn Handler<ButtonEvent>>>> = None;
+
+#[interrupt]
+fn GPIOF() {
+    hprintln!("GPIOF interrupt");
+
+    unsafe {
+        let pin = PF4_BUTTON.as_mut().unwrap().get().as_mut().unwrap();
+        if pin.is_high() {
+            PF4_BUTTON_HANDLER
+                .as_mut()
+                .unwrap()
+                .get()
+                .as_mut()
+                .unwrap()
+                .handle(ButtonEvent::Released);
+        } else {
+            PF4_BUTTON_HANDLER
+                .as_mut()
+                .unwrap()
+                .get()
+                .as_mut()
+                .unwrap()
+                .handle(ButtonEvent::Pressed);
+        }
+
+        PF0_BUTTON
+            .as_mut()
+            .unwrap()
+            .get()
+            .as_mut()
+            .unwrap()
+            .clear_interrupt();
+        PF4_BUTTON
+            .as_mut()
+            .unwrap()
+            .get()
+            .as_mut()
+            .unwrap()
+            .clear_interrupt();
+    };
+}
 
 #[exception]
 unsafe fn HardFault(ef: &ExceptionFrame) -> ! {

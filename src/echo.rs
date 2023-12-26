@@ -1,6 +1,7 @@
 use crate::limero::*;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use embassy_futures::yield_now;
 use embassy_sync::channel;
 use embassy_time::Instant;
 use embedded_hal::digital::OutputPin;
@@ -50,24 +51,28 @@ impl Echo {
 
     pub async fn run(&mut self) {
         info!("Echo run");
-        self.emitter
-            .emit(EchoCmd::EchoMsg(0, Instant::now().as_millis() as u64));
         loop {
-            let cmd = self.channel.borrow().receiver().receive().await;
-            match cmd {
-                EchoCmd::EchoMsg(count, ts) => {
-                    if count < self.max_count {
-                        let msg = EchoCmd::EchoMsg(count + 1, ts);
-                        self.emitter.emit(msg);
-                    } else {
-                        let delta = Instant::now().as_millis() as u64 - ts;
-                        info!("Echo done {} messages in {} ms", count, delta);
-                        info!(
-                            "Echo done {} messages per second",
-                            count as u64 * 1000 / delta
-                        );
+            self.emitter
+                .emit(EchoCmd::EchoMsg(0, Instant::now().as_millis() as u64));
+            loop {
+                let cmd = self.channel.borrow().receiver().receive().await;
+                match cmd {
+                    EchoCmd::EchoMsg(count, ts) => {
+                        if count < self.max_count {
+                            let msg = EchoCmd::EchoMsg(count + 1, ts);
+                            self.emitter.emit(msg);
+                        } else {
+                            let delta = Instant::now().as_millis() as u64 - ts;
+                            info!("Echo done {} messages in {} ms", count, delta);
+                            info!(
+                                "Echo done {} messages per second",
+                                count as u64 * 1000 / delta
+                            );
+                            break;
+                        }
                     }
                 }
+                yield_now().await;
             }
         }
     }
